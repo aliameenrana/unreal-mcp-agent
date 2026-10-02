@@ -19,3 +19,6 @@ UnrealProject/.vscode/
 
 # MCP server audit log (local, not project history)
 *.audit.jsonl
+
+# Claude Code harness state, not project content
+.claude/
