@@ -1,0 +1,21 @@
+# Python
+.venv/
+__pycache__/
+*.pyc
+*.egg-info/
+
+# Unreal Engine project artifacts (regenerated, never commit these)
+UnrealProject/Binaries/
+UnrealProject/Intermediate/
+UnrealProject/Saved/
+UnrealProject/DerivedDataCache/
+UnrealProject/.vs/
+UnrealProject/.vscode/
+*.VC.db
+*.opensdf
+*.sdf
+*.sln
+*.suo
+
+# MCP server audit log (local, not project history)
+*.audit.jsonl
