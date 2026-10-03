@@ -4,13 +4,10 @@ __pycache__/
 *.pyc
 *.egg-info/
 
-# Unreal Engine project artifacts (regenerated, never commit these)
-UnrealProject/Binaries/
-UnrealProject/Intermediate/
-UnrealProject/Saved/
-UnrealProject/DerivedDataCache/
-UnrealProject/.vs/
-UnrealProject/.vscode/
+# The local Unreal test project is not part of this repo (see README for
+# setup steps to recreate it, or point the server at your own project).
+UnrealProject/
+
 *.VC.db
 *.opensdf
 *.sdf

@@ -45,8 +45,8 @@ export UNREAL_ENGINE_ROOT="/path/to/UE_5.8"
 ### Enable Remote Control API in your Unreal project
 
 Every step below is done once per project, inside the Unreal Editor itself.
-Already done for `UnrealProject/`, the throwaway test project in this repo.
-For any other project:
+This repo doesn't ship an Unreal project (point the server at any project
+of your own). For whichever project you use:
 
 1. **Enable the plugin.** Edit → Plugins → search "Remote Control API" →
    enable → restart the editor when prompted. (Also confirm "Python Editor
