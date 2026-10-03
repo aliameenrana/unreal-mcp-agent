@@ -1,10 +1,19 @@
 """
-Thin wrapper around Epic's remote_execution.py, giving the rest of this
-package a simple connect / run_python / disconnect surface.
+Thin wrapper around Unreal's Remote Control API (HTTP), giving the rest of
+this package a simple connect / run_python / disconnect surface.
+
+Originally written against Unreal's built-in Python Remote Execution
+protocol (UDP multicast discovery + TCP). That protocol's multicast
+discovery did not work reliably (see README) even with the editor-side
+setting correctly enabled, so this talks to the Remote Control API instead:
+a plain HTTP server the editor exposes on localhost, calling
+PythonScriptLibrary.ExecutePythonCommandEx by object path. Requires the
+editor-side setup documented in README.md (Remote Control API plugin,
+Enable Remote Python Execution, PythonScriptLibrary on the allowlist).
 
 Convention used throughout this project: every remote snippet we send ends
 in an expression wrapped in `json.dumps(...)`, and we always run in
-EVALUATE_STATEMENT mode. That means `run_python()` always gets back a JSON
+EvaluateStatement mode. That means `run_python()` always gets back a JSON
 string it can parse, regardless of whether the underlying Unreal value was a
 string, a list, a bool, or whatever else. Avoids guessing at repr-vs-str
 formatting differences between types.
@@ -12,12 +21,15 @@ formatting differences between types.
 
 from __future__ import annotations
 
+import ast
 import json
-import time
+import os
 from dataclasses import dataclass
 from typing import Any
 
-from . import engine_locator
+import requests
+
+_PYTHON_LIBRARY_OBJECT_PATH = "/Script/PythonScriptPlugin.Default__PythonScriptLibrary"
 
 
 class BridgeError(RuntimeError):
@@ -41,74 +53,95 @@ class CommandResult:
 
 class UnrealBridge:
     """
-    One of these per MCP server process. Call connect() once at startup
-    (or lazily on first tool call), then run_python() per tool call.
+    One of these per MCP server process. Connection is just an HTTP base
+    URL; there's no persistent session to hold open, so connect() only
+    does a reachability check.
     """
 
-    def __init__(self, discovery_timeout_seconds: float = 8.0) -> None:
-        self._discovery_timeout = discovery_timeout_seconds
-        self._remote_execution_module = None
-        self._session = None
-        self._connected_node_id: str | None = None
+    def __init__(
+        self,
+        host: str = "127.0.0.1",
+        port: int = 30010,
+        timeout_seconds: float = 8.0,
+    ) -> None:
+        self._base_url = f"http://{host}:{port}"
+        self._timeout = timeout_seconds
+        self._connected = False
 
     def connect(self) -> str:
         """
-        Starts discovery, waits for at least one Unreal Editor node to
-        appear, and opens a command connection to it. Returns the node id
-        connected to. Raises NoEditorFoundError if nothing answers in time.
+        Confirms the editor's Remote Control web server is reachable.
+        Returns the base URL connected to. Raises NoEditorFoundError if
+        nothing answers.
         """
-        if self._connected_node_id is not None:
-            return self._connected_node_id
+        if self._connected:
+            return self._base_url
 
-        remote_execution = engine_locator.load_remote_execution_module()
-        self._remote_execution_module = remote_execution
-
-        session = remote_execution.RemoteExecution()
-        session.start()
-        self._session = session
-
-        deadline = time.monotonic() + self._discovery_timeout
-        node_id = None
-        while time.monotonic() < deadline:
-            nodes = session.remote_nodes
-            if nodes:
-                node_id = nodes[0]["node_id"]
-                break
-            time.sleep(0.2)
-
-        if node_id is None:
-            session.stop()
-            self._session = None
+        try:
+            # Any 2xx/4xx response means something is listening; a 404 on
+            # the bare root is expected and still proves the server is up.
+            requests.get(self._base_url, timeout=self._timeout)
+        except requests.exceptions.RequestException as exc:
             raise NoEditorFoundError(
-                "No running Unreal Editor instance answered the discovery "
-                "broadcast within the timeout. Is the editor open, and is "
-                "bRemoteExecution=True set in DefaultEngine.ini?"
-            )
+                "No running Unreal Editor instance answered on "
+                f"{self._base_url}. Is the editor open, and is the Remote "
+                "Control API plugin enabled? See README.md setup steps."
+            ) from exc
 
-        session.open_command_connection(node_id)
-        self._connected_node_id = node_id
-        return node_id
+        self._connected = True
+        return self._base_url
 
     def disconnect(self) -> None:
-        if self._session is not None:
-            self._session.stop()
-            self._session = None
-        self._connected_node_id = None
+        self._connected = False
+
+    def _call_execute_python_command_ex(self, code: str) -> dict[str, Any]:
+        self.connect()
+        payload: dict[str, Any] = {
+            "objectPath": _PYTHON_LIBRARY_OBJECT_PATH,
+            "functionName": "ExecutePythonCommandEx",
+            "parameters": {
+                "PythonCommand": code,
+                "ExecutionMode": "EvaluateStatement",
+            },
+            "generateTransaction": False,
+        }
+        passphrase = os.environ.get("UNREAL_RC_PASSPHRASE")
+        if passphrase:
+            payload["Passphrase"] = passphrase
+
+        response = requests.put(
+            f"{self._base_url}/remote/object/call",
+            json=payload,
+            timeout=self._timeout,
+        )
+        try:
+            data = response.json()
+        except ValueError as exc:
+            raise RemoteCommandFailedError(
+                f"Non-JSON response from Unreal (HTTP {response.status_code}): "
+                f"{response.text!r}"
+            ) from exc
+
+        if response.status_code != 200:
+            raise RemoteCommandFailedError(
+                f"Remote Control call failed (HTTP {response.status_code}): "
+                f"{data.get('errorMessage', data)!r}"
+            )
+        return data
 
     def run_raw(self, code: str, exec_mode: str | None = None) -> dict[str, Any]:
         """
         Runs arbitrary code (statement or multi-line file-style script) and
-        returns the raw command_result dict, unparsed. Used only by the
-        execute_python escape hatch, which can't assume the caller wrapped
-        their code in json.dumps(...). Named tools should use run_python()
-        instead, which enforces that convention.
-        """
-        self.connect()
-        remote_execution = self._remote_execution_module
-        assert self._session is not None
+        returns the raw ExecutePythonCommandEx result dict, unparsed. Used
+        only by the execute_python escape hatch, which can't assume the
+        caller wrapped their code in json.dumps(...). Named tools should use
+        run_python() instead, which enforces that convention.
 
-        mode = exec_mode or remote_execution.MODE_EXEC_FILE
-        return self._session.run_command(code, unattended=True, exec_mode=mode)
+        exec_mode is accepted for interface compatibility with the old
+        remote_execution-based bridge but ignored: ExecuteStatement handles
+        both single statements and multi-line scripts.
+        """
+        return self._call_execute_python_command_ex(code)
 
     def run_python(self, expression: str) -> Any:
         """
@@ -117,22 +150,20 @@ class UnrealBridge:
         for wrapping the expression in json.dumps(...) on the remote side,
         e.g. run_python("__import__('json').dumps(1 + 1)") -> 2.
         """
-        self.connect()
-        remote_execution = self._remote_execution_module
-        assert self._session is not None
+        data = self._call_execute_python_command_ex(expression)
 
-        data = self._session.run_command(
-            expression,
-            unattended=True,
-            exec_mode=remote_execution.MODE_EVAL_STATEMENT,
-        )
+        if not data.get("ReturnValue"):
+            log = data.get("LogOutput", [])
+            raise RemoteCommandFailedError(f"Remote command failed: {log!r}")
 
-        if not data.get("success"):
-            raise RemoteCommandFailedError(
-                f"Remote command failed: {data.get('result')!r}"
-            )
-
-        raw_result = data.get("result", "")
+        raw_result = data.get("CommandResult", "")
+        # CommandResult is Unreal's repr() of the Python return value, so a
+        # string result arrives as e.g. "'[1, 2, 3]'" (repr-quoted), not raw
+        # JSON. Unwrap that one repr layer before parsing.
+        try:
+            raw_result = ast.literal_eval(raw_result)
+        except (ValueError, SyntaxError):
+            pass
         try:
             return json.loads(raw_result)
         except (json.JSONDecodeError, TypeError) as exc:
