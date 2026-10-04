@@ -670,7 +670,22 @@ replacement for reading the docs on the next one.
    explicitly. Same trap class as the positional constructors above: the
    obvious spelling is invalid, and a different obvious spelling silently
    yields a string instead of a value.
-7. **`CommandResult` from `ExecutePythonCommandEx` arrives repr-wrapped.**
+7. **Cleanup must delete an exact allowlist of the names you created, never a
+   prefix or a class match.** This one cost a real actor. A verification script
+   owned two scratch `StaticMeshActor`s and cleaned up with
+   `[a for a in actors if a.name.startswith("StaticMeshActor_UAID_")]`. Every
+   mesh actor in the level is named `StaticMeshActor_UAID_<guid>` — the
+   generated prefix *is* the class name — so the sweep matched the level's own
+   content and destroyed it along with the scratch actors. The actor count is a
+   weak guard here: the baseline happened to move 138 to 137, a delta small
+   enough to read as noise rather than as data loss.
+
+   The rule: record every name you create in a list as you create it, and
+   delete by membership in that list. A prefix, a class name, a tag, or a
+   spatial query are all selection predicates that can match something you did
+   not make. Verify the level is unchanged by comparing against a snapshot
+   taken *before* the run, not against a count.
+8. **`CommandResult` from `ExecutePythonCommandEx` arrives repr-wrapped.**
    Unreal `repr()`s the Python return value before putting it on the wire,
    so a string result comes back double-encoded. `bridge.py`'s
    `run_python()` already handles this (`ast.literal_eval` unwrap before

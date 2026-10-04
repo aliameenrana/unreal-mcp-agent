@@ -160,6 +160,21 @@ def jsonable(value_expr: str, max_depth: int = 6) -> str:
     return f"(lambda f: f(f, {max_depth!r}, {value_expr}))(lambda self, depth, v:{body})"
 
 
+def indent_block(text: str, spaces: int = 0) -> str:
+    """
+    Indents every non-blank line of a multi-line snippet, so it can be spliced
+    into an already-indented block.
+
+    Needed when a caller builds an option snippet in one function and injects it
+    into another: the continuation lines of a triple-quoted f-string carry no
+    leading whitespace of their own, so dropping them straight into an indented
+    block dedents them out of it and produces an IndentationError that only
+    surfaces inside the editor.
+    """
+    pad = " " * spaces
+    return "\n".join(pad + line if line.strip() else line for line in text.splitlines())
+
+
 def guarded(body: str) -> str:
     """
     Runs `body` (Python source lines) on the Unreal side inside a try/except
@@ -191,4 +206,21 @@ def guarded(body: str) -> str:
         "    OUT = {'found': False, 'value': None, 'type': None,"
         " 'error': type(_e).__name__ + (': ' + _m if _m else '')}"
     )
+
+    # Compile the wrapper before handing it over. The body is embedded as a
+    # string literal inside exec(), so parsing the *outer* expression never sees
+    # it. A malformed body used to reach the editor and fail there at compile
+    # time, before guarded's own try/except could report anything, arriving as a
+    # RemoteCommandFailedError with an empty log and no clue. The unit tests had
+    # the same blind spot, since they only parsed the outer expression. Checking
+    # here turns that into a local SyntaxError naming the offending line.
+    try:
+        compile(src, "<guarded>", "exec")
+    except SyntaxError as exc:
+        raise SyntaxError(
+            f"guarded() built a snippet that does not compile: {exc.msg} "
+            f"(line {exc.lineno} of the generated source). This is almost always "
+            f"a multi-line snippet spliced in without indent_block()."
+        ) from exc
+
     return f"(lambda g: (exec({src!r}, g), __import__('json').dumps(g['OUT']))[-1])({{}})"

@@ -152,12 +152,52 @@ reason.
   takes the editor down rather than returning the documented "none if it
   didn't succeed", so the tool resolves the actor to None first and reports a
   missing actor as an error instead.
-- `attach_actor` / `detach_actor` — `Actor.attach_to_actor` / `detach_from_actor`, socket support.
-- `set_actor_folder` — `Actor.set_folder_path`, for scene organization.
-- `tag_actor` / `find_actors_by_tag` — `Actor.tags`, `EditorActorSubsystem.get_selected_level_actors` filtered.
-- `set_actor_parent_component` — component hierarchy edits, not just actor-level.
-- `group_actors` / `ungroup_actors` — `EditorActorSubsystem` grouping calls.
-- `select_actors` / `get_selected_actors` — drives viewport selection state the agent can reason about.
+- `attach_actor` / `detach_actor`, done and live-verified. Two corrections:
+  - The attached socket is read back with
+    `Actor.get_attach_parent_socket_name()`. There is **no
+    `Actor.get_attach_component`**, and the symptom is nasty: the
+    `AttributeError` inside the snippet surfaced as a
+    `RemoteCommandFailedError` with an empty log, so the cause was invisible
+    until probed directly. `SceneComponent.get_attach_socket_name` exists and is
+    the same idea one level down.
+  - The two sides use **differently named enums**: `AttachmentRule` when
+    attaching (`KEEP_RELATIVE`, `KEEP_WORLD`, `SNAP_TO_TARGET`), but
+    `DetachmentRule` when detaching, and that one has **no `SNAP_TO_TARGET`**.
+    Defaulting both tools to `KEEP_WORLD` means an attach or detach does not
+    move the actor, which is almost always what you want.
+- `set_actor_folder`, done and live-verified. **A folder path at the outliner
+  root reads back as the literal string `'None'`, not `''`**: `get_folder_path`
+  returns a null `Name` and `str()` of a null `Name` renders as `'None'`. Both
+  `set_actor_folder` and `get_selected_actors` normalize it, because an agent
+  comparing folder paths would otherwise never be able to match the root.
+- `tag_actor` / `find_actors_by_tag`, done and live-verified. `Actor.tags`
+  reads back as an **`Array` at runtime even though the stub types it
+  `Set[str]`**, so the tool writes a sorted list back rather than a set.
+  With no tag at all, `find_actors_by_tag` switches to listing the whole tag
+  vocabulary with per-tag counts, which is the only way to discover what tags a
+  level actually uses: **`EditorActorSubsystem` has no tag search method at
+  all** in 5.8, so this filters `get_all_level_actors()`. (PLAN.md previously
+  suggested filtering `get_selected_level_actors`, which would have searched
+  only the viewport selection.)
+- `select_actors` / `get_selected_actors`, done and live-verified.
+  `set_selected_level_actors` **replaces** the entire selection, silently
+  discarding whatever the user had selected, so the tool adds one actor at a
+  time via `set_actor_selection_state` by default and only takes the replacing
+  path with `replace=True` + `confirm=True`. `select_all` and
+  `invert_selection` are never used: they act on whatever the user happened to
+  have selected.
+- `set_actor_parent_component` — **deliberately not built.** `attach_actor`
+  covers actor-level parenting, which is what the scene graph needs; attaching
+  to a specific *component* socket is `Actor.attach_to_component` and belongs
+  with the component tools if it is ever needed.
+- `group_actors` / `ungroup_actors` — **not available, and the stub is wrong
+  about it.** The Python stub lists `EditorActorSubsystem.group_actors`
+  (returning a `GroupActor`) and `.ungroup_actors`, but the **live subsystem
+  object has neither**; a `dir()` sweep for group/select/tag/parent members
+  returns selection methods only. This is the clearest instance so far of the
+  stub being a **superset** of the running API, which is the opposite of the
+  `dir()`-omits-properties case already documented above. Neither the docs nor
+  the stub is sufficient on its own; check the live object.
 
 ### Components
 
@@ -185,7 +225,13 @@ count and the surviving component names were compared against an independent
 ### Meshes and geometry
 
 - `set_mesh_material_slot` / `get_mesh_material_slot`, done (see Components).
-- `get_mesh_bounds`, done. Wraps `StaticMesh.get_bounding_box()`, which
+- `get_mesh_bounds`, done, and it now handles **both** mesh kinds. A
+  `StaticMesh` has `get_bounding_box()` returning a Box of two corner Vectors.
+  A `SkeletalMesh` has **no `get_bounding_box` at all**; it has `get_bounds()`
+  returning a `BoxSphereBounds` with an `origin` and a `box_extent`. The tool
+  normalizes both to min/max/size/extent and also reports `sphere_radius` for a
+  SkeletalMesh, since that is the bound the engine culls against.
+  Wraps `StaticMesh.get_bounding_box()`, which
   returns a `Box` of two corner `Vector`s, not an origin/extent pair. Local
   space, so it does not move when an actor using the mesh moves. Note
   `Vector` is not iterable in this Python build, so the corners have to be read
@@ -197,17 +243,43 @@ count and the surviving component names were compared against an independent
   LODs at half and a fifth of the triangles). There is no
   `StaticMeshReductionOptions.percent_triangle_reduction` field; the
   percentage lives on `StaticMeshReductionSettings.percent_triangles`.
-- `import_static_mesh` / `import_skeletal_mesh`, buildable via
-  `AssetImportTask` (`filename`, `destination_path`, `destination_name`,
-  `options`, `automated`, `replace_existing`, and an `imported_object_paths`
-  result field) plus `AssetToolsHelpers.get_asset_tools().import_asset_tasks`.
-  **Not yet built or verified**: verifying it needs a source FBX, and the test
-  project has none.
-- `set_collision_complexity`, **not buildable as named.** No
-  `set_collision_complexity` and no `CollisionComplexity` symbol exists
-  anywhere in the Python API for this build. The nearest real calls are
-  `EditorStaticMeshLibrary.set_convex_decomposition_collisions` and
-  `remove_collisions`.
+- `import_static_mesh` / `import_skeletal_mesh`, done and live-verified with a
+  synthesized Wavefront OBJ, since the project had no FBX. Three things the
+  docs and stub do not tell you:
+  - `import_asset_tasks` returns `None` whether it worked or not. Success is
+    only visible in the task's `imported_object_paths`, which is why every
+    importer here reports paths rather than a boolean.
+  - Those paths are **already full object paths** (`/Game/M/M.M`). Appending
+    `"." + name` to them, which reads like an obvious normalization, produces
+    `/Game/M/M.M.M`.
+  - One file can import as several assets: an OBJ with two `o` groups produced
+    two meshes. So the result is a list.
+  - `import_skeletal_mesh` uses `FbxImportUI` (with `import_mesh`,
+    `import_as_skeletal`, `import_animations`, `import_materials`,
+    `import_textures`, `skeleton`). All of those properties were confirmed
+    present. Given an OBJ it still succeeds, producing a Skeleton plus a mesh,
+    so the pipeline is proven end to end; **what remains unverified is skeletal
+    content** (bones, animation tracks, a real FBX), since no FBX was
+    available.
+- `set_collision_complexity`, **not buildable as named, and the correct API is
+  now known.** Built instead as `get_mesh_collision_info` (read) and
+  `set_mesh_collision_preset` (write), both live-verified. What the live
+  `StaticMeshEditorSubsystem` actually has:
+  - `get_collision_complexity(static_mesh)` exists and returns a
+    **`CollisionTraceFlag`** (`CTF_USE_DEFAULT`, `CTF_USE_SIMPLE_AS_COMPLEX`,
+    `CTF_USE_COMPLEX_AS_SIMPLE`, `CTF_USE_SIMPLE_AND_COMPLEX`), **not** a
+    `CollisionComplexity`. No `CollisionComplexity` symbol exists anywhere.
+  - There is **no setter**. The setting only changes as a side effect of
+    rebuilding hulls, so the write side is a preset over three real calls:
+    `remove_collisions` (always first), then either
+    `set_convex_decomposition_collisions(mesh, hull_count, max_hull_verts,
+    hull_precision)` or `add_simple_collisions(mesh, shape_type)` where
+    shape_type is `BOX` / `SPHERE` / `CAPSULE`.
+  - **`hull_count` is a ceiling, not a target.** On a convex solid every
+    parameter combination yields exactly 1 hull, because one hull is already
+    sufficient; on a concave mesh, 2 yields 2 hulls, 4 yields 4, and 8 yields 5
+    because 5 is all the geometry needs. A convex test mesh therefore cannot
+    tell you whether `hull_count` does anything at all.
 
 ### Materials and textures — this is a bigger domain than the MVP list suggests
 
@@ -327,6 +399,21 @@ particle logic from scratch.
 - `set_sound_attenuation_settings` — distance/falloff config on a `SoundAttenuation` asset.
 
 ### Asset management (general)
+
+- Import sources are deliberately allowed to live **outside** the project, since
+  a mesh or texture is normally exported from a DCC tool somewhere else, so
+  `resolve_path_in_project` does not apply. What guards them instead is
+  `security.check_import_source` (the file must exist and carry a suffix on an
+  importable allowlist) and `security.check_destination_path` (must be under
+  `/Game/`). **`/Engine` is refused on purpose**: a tool that can write there
+  corrupts the install rather than the project. Plugin content is refused for
+  the same reason. The prefix check includes the trailing slash, because
+  `/Gameplay` passes a `startswith("/Game")` test and is not a content path.
+- `import_texture`, done and live-verified against a synthesized PNG. **`srgb`
+  and `compression_settings` are not on `TextureFactory`** (it exposes neither,
+  and setting them raises `AttributeError`); they are properties of the
+  imported `Texture2D`, so the tool sets them after the import and saves.
+
 
 - `import_asset` — generic `AssetImportTask` dispatcher (FBX, textures, audio, CSV data tables) behind one interface, since the per-type tools above all reduce to this.
 - `list_assets_in_path` — `EditorAssetLibrary.list_assets`.
@@ -531,3 +618,11 @@ before moving to the next, same discipline as the MVP:
 ## Next step
 
 Start implementing phase 1: MCP server scaffold + Python Remote Execution bridge + the MVP tool list above.
+
+### Materials, domain and shading (verified)
+
+`set_material_domain_and_shading_model` is built and live-verified. Notes are
+in the materials section above; the short version is that `material_domain` is
+a settable property, `shading_model` has no setter but responds to
+`set_editor_property`, and read-back is a repr string that has to be compared by
+enum name.

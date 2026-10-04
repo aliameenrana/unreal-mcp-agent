@@ -75,6 +75,63 @@ DANGEROUS_STRING_SUBSTRINGS = (
 )
 
 
+# Suffixes an import tool will accept. Importing is the one operation here that
+# deliberately reads a file from outside the project (the source asset lives in
+# a DCC tool's export folder, not in Content/), so resolve_path_in_project does
+# not apply. The suffix allowlist is what keeps a path argument from being a
+# way to point the editor at something it should not parse.
+IMPORTABLE_SUFFIXES = frozenset({
+    # meshes
+    ".fbx", ".obj", ".dae", ".abc", ".usd", ".usda", ".usdc", ".gltf", ".glb",
+    # textures
+    ".png", ".jpg", ".jpeg", ".tga", ".bmp", ".tif", ".tiff", ".exr", ".hdr",
+    ".dds", ".tiff", ".psd", ".gif",
+    # volumes / misc
+    ".nii", ".dicom",
+})
+
+
+def check_import_source(path_str: str) -> Path:
+    """
+    Validates a filesystem path handed to an import tool. Unlike other path
+    arguments this one is expected to point outside the project, so this checks
+    that the file exists and carries a suffix the editor knows how to import,
+    rather than that it stays inside Content/. Returns the resolved Path.
+    """
+    candidate = Path(path_str).expanduser().resolve()
+
+    if not candidate.exists():
+        raise SecurityViolation(f"Import source '{path_str}' does not exist.")
+    if not candidate.is_file():
+        raise SecurityViolation(f"Import source '{path_str}' is not a file.")
+
+    suffix = candidate.suffix.lower()
+    if suffix not in IMPORTABLE_SUFFIXES:
+        raise SecurityViolation(
+            f"Import source '{candidate.name}' has suffix '{suffix}', which is not "
+            f"an importable type. Allowed: {', '.join(sorted(IMPORTABLE_SUFFIXES))}."
+        )
+    return candidate
+
+
+def check_destination_path(destination_path: str, valid_prefixes=("/Game/",)) -> str:
+    """
+    An import destination must live under /Game. /Engine is excluded on purpose:
+    it is engine content, and a tool that can write there can corrupt the
+    install rather than the project. Plugin content (/MyPlugin) is excluded for
+    the same reason.
+
+    Note the prefix has to include the trailing slash. "/Gameplay" passes a
+    startswith("/Game") check but is not a content path at all.
+    """
+    if not destination_path.startswith(valid_prefixes):
+        raise SecurityViolation(
+            f"Destination '{destination_path}' must be under "
+            f"{' or '.join(valid_prefixes)}."
+        )
+    return destination_path
+
+
 class SecurityViolation(Exception):
     """Raised when a tool call or a raw Python snippet trips a hard block."""
 
@@ -173,6 +230,12 @@ TOOL_RISK_TIERS: dict[str, RiskTier] = {
     "set_component_property": RiskTier.CONSTRUCTIVE,
     "list_components": RiskTier.READ_ONLY,
     "get_mesh_bounds": RiskTier.READ_ONLY,
+    "get_mesh_collision_info": RiskTier.READ_ONLY,
+    "set_mesh_collision_preset": RiskTier.DESTRUCTIVE,
+    "import_static_mesh": RiskTier.CONSTRUCTIVE,
+    "import_skeletal_mesh": RiskTier.CONSTRUCTIVE,
+    "import_texture": RiskTier.CONSTRUCTIVE,
+    "set_material_domain_and_shading_model": RiskTier.DESTRUCTIVE,
     "set_mesh_lods": RiskTier.DESTRUCTIVE,
     "duplicate_actor": RiskTier.CONSTRUCTIVE,
     "set_mesh_material_slot": RiskTier.CONSTRUCTIVE,
@@ -191,6 +254,13 @@ TOOL_RISK_TIERS: dict[str, RiskTier] = {
     "light_scene_preset": RiskTier.CONSTRUCTIVE,
     "set_dressing_pass": RiskTier.CONSTRUCTIVE,
     "apply_material_variant_set": RiskTier.CONSTRUCTIVE,
+    "attach_actor": RiskTier.CONSTRUCTIVE,
+    "detach_actor": RiskTier.CONSTRUCTIVE,
+    "set_actor_folder": RiskTier.CONSTRUCTIVE,
+    "tag_actor": RiskTier.CONSTRUCTIVE,
+    "find_actors_by_tag": RiskTier.READ_ONLY,
+    "select_actors": RiskTier.DESTRUCTIVE,
+    "get_selected_actors": RiskTier.READ_ONLY,
     "delete_actor": RiskTier.DESTRUCTIVE,
     "delete_asset": RiskTier.DESTRUCTIVE,
     "execute_python": RiskTier.SYSTEM,  # gated separately via check_python_code, not blocked outright

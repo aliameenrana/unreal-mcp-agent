@@ -7,6 +7,8 @@ Not yet exercised against a live editor.
 
 from __future__ import annotations
 
+from pathlib import Path
+
 from .. import security
 from ..bridge import get_bridge
 from ..remote_snippets import (
@@ -157,3 +159,206 @@ def set_material_vector_parameter(
     )
     result = get_bridge().run_python(expr)
     return {"success": True, "instance_path": result, "param": param_name, "rgba": (r, g, b, a)}
+
+
+# ---------------------------------------------------------------------------
+# Domain / shading model
+#
+# `material_domain` is a plain settable property. `shading_model` is NOT: the
+# live Material object exposes no setter for it, and `shading_models` (the UE5
+# multi-model array that replaced it) is not exposed either. It is still
+# readable with get_editor_property("shading_model"), and writable through
+# set_editor_property under the same name, which is what this tool uses.
+# ---------------------------------------------------------------------------
+
+MATERIAL_DOMAINS = (
+    "MD_SURFACE",
+    "MD_DEFERRED_DECAL",
+    "MD_LIGHT_FUNCTION",
+    "MD_POST_PROCESS",
+    "MD_VOLUME",
+    "MD_UI",
+)
+
+
+def set_material_domain_and_shading_model(
+    material_path: str,
+    domain: str | None = None,
+    shading_model: str | None = None,
+    confirm: bool = False,
+) -> dict:
+    """
+    Changes a material's domain and/or shading model and recompiles it.
+
+    Destructive, and needs confirm=True, for a reason beyond habit: the domain
+    decides which material slots will accept the material at all. Moving an
+    existing material from MD_SURFACE to MD_UI or MD_POST_PROCESS makes it stop
+    rendering on every mesh that currently uses it, and nothing in the editor
+    warns about that before it happens.
+
+    domain is one of MD_SURFACE, MD_DEFERRED_DECAL, MD_LIGHT_FUNCTION,
+    MD_POST_PROCESS, MD_VOLUME, MD_UI. shading_model is any
+    MaterialShadingModel member such as MSM_DEFAULT_LIT or MSM_UNLIT. Either
+    argument may be None to change only the other.
+    """
+    security.enforce_tier("set_material_domain_and_shading_model", confirm=confirm)
+    security.check_destination_path(material_path)
+
+    if domain is None and shading_model is None:
+        return {"success": False, "error": "Pass a domain, a shading_model, or both."}
+    if domain is not None and domain not in MATERIAL_DOMAINS:
+        return {
+            "success": False,
+            "error": f"Unknown domain {domain!r}. Choose one of {', '.join(MATERIAL_DOMAINS)}.",
+        }
+
+    body = (
+        f"mat = {load_asset(material_path)}\n"
+        f"if mat is None:\n"
+        f"    OUT = {{'found': False, 'error': 'Could not load ' + {material_path!r},\n"
+        f"          'domain_before': None, 'shading_before': None,\n"
+        f"          'domain_after': None, 'shading_after': None, 'compiled': False}}\n"
+        f"else:\n"
+        f"    dom_before = str(mat.get_editor_property('material_domain'))\n"
+        f"    shd_before = str(mat.get_editor_property('shading_model'))\n"
+        + (f"    mat.set_editor_property(\n"
+           f"        'material_domain', {UNREAL}.MaterialDomain.{domain})\n"
+           if domain else "")
+        + (f"    mat.set_editor_property(\n"
+           f"        'shading_model', {UNREAL}.MaterialShadingModel.{shading_model})\n"
+           if shading_model else "")
+        + f"    # Saving here is what triggers the shader recompile for the new\n"
+        + f"    # domain, so this call is given a longer timeout by its caller.\n"
+        + f"    {UNREAL}.EditorAssetLibrary.save_loaded_asset(mat, only_if_is_dirty=True)\n"
+        f"    OUT = {{'found': True, 'error': None,\n"
+        f"          'domain_before': dom_before, 'shading_before': shd_before,\n"
+        f"          'domain_after': str(mat.get_editor_property('material_domain')),\n"
+        f"          'shading_after': str(mat.get_editor_property('shading_model')),\n"
+        f"          'compiled': True}}\n"
+    )
+    payload = get_bridge().run_python(
+        guarded(body),
+        timeout=90.0,  # a domain change recompiles shaders on save
+    )
+
+    if not payload.get("found"):
+        return {"success": False, "material_path": material_path, "error": payload.get("error")}
+
+    # The enum read back as "<MaterialDomain.MD_UI: 4>", so compare on the name.
+    def _name(text):
+        return text.split(".")[1].split(":")[0] if text and "." in text else text
+
+    ok = True
+    if domain is not None:
+        ok = ok and _name(payload.get("domain_after")) == domain
+    if shading_model is not None:
+        ok = ok and _name(payload.get("shading_after")) == shading_model
+
+    return {
+        "success": ok,
+        "material_path": material_path,
+        "domain_before": _name(payload.get("domain_before")),
+        "domain_after": _name(payload.get("domain_after")),
+        "shading_before": _name(payload.get("shading_before")),
+        "shading_after": _name(payload.get("shading_after")),
+        "error": None if ok else "Value did not read back as requested.",
+    }
+
+
+def import_texture(
+    source_file: str,
+    destination_path: str = "/Game/MCPTest",
+    destination_name: str = "",
+    replace_existing: bool = False,
+    srgb: bool = True,
+    compression: str | None = None,
+) -> dict:
+    """
+    Imports an image file as a Texture2D asset. Accepts png, jpg, tga, bmp,
+    tif, exr, hdr, dds and psd.
+
+    srgb and compression are applied to the imported asset after the fact, not
+    to the factory: `TextureFactory` exposes no `srgb` or `compression_settings`
+    at all, so setting them there raises AttributeError. Both are properties of
+    the resulting Texture2D instead.
+
+    srgb should be True for colour data and False for masks, roughness or
+    normal maps, where the file holds linear data and sRGB conversion would
+    corrupt it. Unreal normally infers this from how the texture is used;
+    forcing it is for when that guess is wrong. compression names a
+    TextureCompressionSettings member such as TC_DEFAULT, TC_NORMALMAP or
+    TC_MASK; left as None to keep Unreal's choice.
+
+    Like the mesh importers, success is reported from the task's
+    imported_object_paths, because import_asset_tasks returns None either way.
+    """
+    security.enforce_tier("import_texture")
+    name = destination_name or Path(source_file).stem
+    return _run_texture_import(source_file, destination_path, name, replace_existing, srgb, compression)
+
+
+def _run_texture_import(
+    source_file: str,
+    destination_path: str,
+    destination_name: str,
+    replace_existing: bool,
+    srgb: bool,
+    compression: str | None,
+) -> dict:
+    security.check_import_source(source_file)
+    security.check_destination_path(destination_path)
+
+    compression_line = (
+        f"    tex.set_editor_property(\n"
+        f"        'compression_settings', {UNREAL}.TextureCompressionSettings.{compression})\n"
+        if compression else ""
+    )
+
+    body = (
+        f"import os\n"
+        f"if not os.path.isfile({source_file!r}):\n"
+        f"    OUT = {{'found': False, 'error': 'No such file: ' + {source_file!r},\n"
+        f"          'asset_path': None, 'size_x': None, 'size_y': None,\n"
+        f"          'srgb': None, 'compression': None}}\n"
+        f"else:\n"
+        f"    task = {UNREAL}.AssetImportTask()\n"
+        f"    task.filename = {source_file!r}\n"
+        f"    task.destination_path = {destination_path!r}\n"
+        f"    task.destination_name = {destination_name!r}\n"
+        f"    task.factory = {UNREAL}.TextureFactory()\n"
+        f"    task.automated = True\n"
+        f"    task.replace_existing = {bool(replace_existing)!r}\n"
+        f"    task.replace_existing_settings = {bool(replace_existing)!r}\n"
+        f"    task.save = True\n"
+        f"    task.async_ = False\n"
+        f"    {asset_tools()}.import_asset_tasks([task])\n"
+        f"    imported = [str(p) for p in task.imported_object_paths]\n"
+        f"    tex = None\n"
+        f"    if imported:\n"
+        f"        tex = {UNREAL}.load_asset(imported[0])\n"
+        f"    if tex is not None:\n"
+        f"        tex.set_editor_property('srgb', {bool(srgb)!r})\n"
+        + compression_line +
+        f"        {UNREAL}.EditorAssetLibrary.save_loaded_asset(tex, only_if_is_dirty=False)\n"
+        f"    OUT = {{'found': True, 'error': None,\n"
+        f"          'asset_path': imported[0] if imported else None,\n"
+        f"          'size_x': tex.blueprint_get_size_x() if tex else None,\n"
+        f"          'size_y': tex.blueprint_get_size_y() if tex else None,\n"
+        f"          'srgb': str(tex.get_editor_property('srgb')) if tex else None,\n"
+        f"          'compression': (str(tex.get_editor_property('compression_settings'))\n"
+        f"                        if tex else None)}}\n"
+    )
+    payload = get_bridge().run_python(guarded(body))
+
+    return {
+        "success": bool(payload.get("found")) and bool(payload.get("asset_path")),
+        "source_file": source_file,
+        "destination_path": destination_path,
+        "destination_name": destination_name,
+        "asset_path": payload.get("asset_path"),
+        "size_x": payload.get("size_x"),
+        "size_y": payload.get("size_y"),
+        "srgb": payload.get("srgb"),
+        "compression": payload.get("compression"),
+        "error": payload.get("error") or (None if payload.get("asset_path") else "Import produced no asset."),
+    }

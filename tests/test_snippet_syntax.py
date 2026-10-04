@@ -19,7 +19,7 @@ from unittest import mock
 
 import pytest
 
-from unreal_mcp import bridge
+from unreal_mcp import bridge, remote_snippets, security
 from unreal_mcp.remote_snippets import (
     actor_component,
     find_actor_by_name,
@@ -41,9 +41,13 @@ class _FakeBridge:
 
     def __init__(self):
         self.last_expr: str | None = None
+        self.last_timeout = None
         self.result = "fake-result"
 
-    def run_python(self, expression: str):
+    def run_python(self, expression: str, timeout=None):
+        # Mirrors the real signature: tools that wait on a shader compile pass
+        # timeout, and the fake has to accept it rather than TypeError.
+        self.last_timeout = timeout
         self.last_expr = expression
         _assert_no_lambda_subscript(expression)
         ast.parse(expression)  # raises SyntaxError if the f-string building is broken
@@ -353,3 +357,538 @@ def test_set_mesh_lods_requires_confirm(fake_bridge):
         assert False, "expected SecurityViolation"
     except Exception as exc:
         assert type(exc).__name__ == "SecurityViolation"
+
+
+# --- actor scene graph ---
+#
+# These lean on behaviour the fake bridge can actually observe (which snippet
+# was built, what the tool returns, whether the bouncer refuses) rather than on
+# grepping the implementation, except where a specific Unreal call is the whole
+# point of the test.
+
+
+def _sent_snippet(fake_bridge):
+    """The last expression sent to Unreal, ready for ast.parse-style inspection."""
+    return fake_bridge.last_expr
+
+
+def test_attach_actor_snippet_is_valid(monkeypatch, fake_bridge):
+    monkeypatch.setattr(
+        fake_bridge, "result",
+        {"found": True, "attached": True, "parent_before": None, "parent_after": "P", "socket": "None"},
+    )
+    r = scene.attach_actor("Child", "Parent")
+    assert r["success"] is True
+
+
+def test_attach_actor_reports_a_missing_child_as_an_error(monkeypatch, fake_bridge):
+    monkeypatch.setattr(
+        fake_bridge, "result",
+        {"found": False, "error": "no actor named ZZ", "attached": False},
+    )
+    r = scene.attach_actor("ZZ", "Parent")
+    assert r["success"] is False
+    assert "ZZ" in r["error"]
+
+
+def test_attach_actor_uses_the_socket_name_reader_that_exists(fake_bridge):
+    """
+    Actor has no get_attach_component in 5.8. Reading the socket back through
+    one produced an AttributeError that surfaced as an empty-log
+    RemoteCommandFailedError rather than a readable failure.
+    """
+    monkeypatch_result = {"found": True, "attached": True, "parent_after": "P", "socket": "None"}
+    fake_bridge.result = monkeypatch_result
+    scene.attach_actor("Child", "Parent")
+    snippet = _sent_snippet(fake_bridge)
+    assert "get_attach_parent_socket_name" in snippet
+    assert "get_attach_component" not in snippet
+
+
+def test_attach_actor_builds_the_rules_from_the_attachment_enum(fake_bridge):
+    fake_bridge.result = {"found": True, "attached": True, "parent_after": "P", "socket": "None"}
+    scene.attach_actor("Child", "Parent", location_rule="SNAP_TO_TARGET")
+    assert "unreal.AttachmentRule.SNAP_TO_TARGET" in _sent_snippet(fake_bridge)
+
+
+def test_detach_actor_uses_the_detachment_enum_not_the_attachment_one(fake_bridge):
+    """
+    The two enums have different names on purpose, and only DetachmentRule
+    exists on the detach side; there is no SNAP_TO_TARGET there at all.
+    """
+    fake_bridge.result = {"found": True, "had_parent": True, "parent_before": "P", "parent_after": None}
+    scene.detach_actor("Child")
+    snippet = _sent_snippet(fake_bridge)
+    assert "unreal.DetachmentRule.KEEP_WORLD" in snippet
+    assert "unreal.AttachmentRule" not in snippet
+
+
+def test_detach_actor_succeeds_only_once_the_parent_is_gone(monkeypatch, fake_bridge):
+    monkeypatch.setattr(
+        fake_bridge, "result",
+        {"found": True, "had_parent": True, "parent_before": "P", "parent_after": "P"},
+    )
+    assert scene.detach_actor("Child")["success"] is False
+
+
+def test_set_actor_folder_round_trips_an_empty_path_as_empty_string(monkeypatch, fake_bridge):
+    """
+    An actor at the outliner root has a null folder Name, and str() of a null
+    Name is the literal text 'None'. Reporting that verbatim would make the root
+    folder unreachable by comparison.
+    """
+    monkeypatch.setattr(
+        fake_bridge, "result",
+        {"found": True, "folder_before": "", "folder_after": ""},
+    )
+    assert scene.set_actor_folder("A", "")["folder_after"] == ""
+
+
+def test_set_actor_folder_normalizes_a_literal_none_string(monkeypatch, fake_bridge):
+    """Guards the normalization itself: the editor reports 'None', not ''."""
+    monkeypatch.setattr(
+        fake_bridge, "result",
+        {"found": True, "folder_before": "", "folder_after": ""},
+    )
+    scene.set_actor_folder("A", "")
+    snippet = _sent_snippet(fake_bridge)
+    assert "== 'None'" in snippet
+
+
+def test_tag_actor_assigns_a_sorted_list_not_a_python_set(fake_bridge):
+    """
+    Actor.tags reads back as an Array at runtime even though the stub types it
+    as Set[str], so handing it a set is the wrong shape to write back.
+    """
+    fake_bridge.result = {"found": True, "tags_before": [], "tags_after": ["A", "B"]}
+    scene.tag_actor("A", ["B", "A"])
+    assert "a.tags = sorted(current)" in _sent_snippet(fake_bridge)
+
+
+def test_tag_actor_dedupes_the_add_and_remove_lists(fake_bridge):
+    fake_bridge.result = {"found": True, "tags_before": [], "tags_after": ["A"]}
+    r = scene.tag_actor("A", ["X", "X", "X"], remove=["Y", "Y"])
+    assert r["added"] == ["X"]
+    assert r["removed"] == ["Y"]
+
+
+def test_find_actors_by_tag_with_no_tag_lists_the_vocabulary(monkeypatch, fake_bridge):
+    monkeypatch.setattr(
+        fake_bridge, "result",
+        {"found": True, "mode": "all_tags", "tags": [("Prop", 2)], "actors": []},
+    )
+    r = scene.find_actors_by_tag("")
+    assert r["mode"] == "all_tags"
+    assert r["count"] is None
+
+
+def test_find_actors_by_tag_counts_hits(monkeypatch, fake_bridge):
+    monkeypatch.setattr(
+        fake_bridge, "result",
+        {"found": True, "mode": "by_tag", "tags": [],
+         "actors": [{"name": "A"}, {"name": "B"}]},
+    )
+    assert scene.find_actors_by_tag("Prop")["count"] == 2
+
+
+def test_find_actors_by_tag_substring_mode_is_case_insensitive(fake_bridge):
+    fake_bridge.result = {"found": True, "mode": "by_tag", "tags": [], "actors": []}
+    scene.find_actors_by_tag("prop", exact=False)
+    assert "low = 'prop'.lower()" in _sent_snippet(fake_bridge)
+
+
+def test_select_actors_replaces_nothing_by_default(fake_bridge):
+    """
+    Both branches live in the snippet; `replace` is substituted as a literal and
+    decides which one runs, so that is what to assert on.
+    """
+    fake_bridge.result = {"found": True, "missing": [], "selected_now": ["A"], "count": 1}
+    scene.select_actors(["A"])
+    snippet = _sent_snippet(fake_bridge)
+    assert "if False:" in snippet      # the replacing branch is dead
+    assert "if True:" not in snippet
+
+
+def test_select_actors_default_never_uses_select_all_or_invert(fake_bridge):
+    """select_all and invert_selection act on the user's existing selection."""
+    fake_bridge.result = {"found": True, "missing": [], "selected_now": ["A"], "count": 1}
+    scene.select_actors(["A"], replace=True, confirm=True)
+    snippet = _sent_snippet(fake_bridge)
+    assert ".select_all(" not in snippet
+    assert "invert_selection" not in snippet
+
+
+def test_select_actors_needs_confirm_before_clobbering_the_selection(fake_bridge):
+    """replace=True discards whatever the user had selected, so it is gated."""
+    with pytest.raises(security.SecurityViolation):
+        scene.select_actors(["A"], replace=True)
+
+
+def test_select_actors_allows_additive_selection_without_confirm(fake_bridge):
+    fake_bridge.result = {"found": True, "missing": [], "selected_now": ["A"], "count": 1}
+    assert scene.select_actors(["A"])["success"] is True
+
+
+def test_select_actors_replace_takes_the_replacing_branch(fake_bridge):
+    fake_bridge.result = {"found": True, "missing": [], "selected_now": ["A"], "count": 1}
+    scene.select_actors(["A"], replace=True, confirm=True)
+    assert "if True:" in _sent_snippet(fake_bridge)
+
+
+def test_select_actors_dedupes_and_reports_missing_names(monkeypatch, fake_bridge):
+    monkeypatch.setattr(
+        fake_bridge, "result",
+        {"found": True, "missing": ["ZZ"], "selected_now": ["A"], "count": 1},
+    )
+    r = scene.select_actors(["A", "A", "ZZ"])
+    assert r["requested"] == ["A", "ZZ"]
+    assert r["missing"] == ["ZZ"]
+    assert r["success"] is False
+
+
+def test_get_selected_actors_snippet_is_valid(monkeypatch, fake_bridge):
+    monkeypatch.setattr(fake_bridge, "result", {"found": True, "count": 0, "actors": []})
+    assert scene.get_selected_actors()["count"] == 0
+
+
+def test_every_scene_graph_tool_has_a_risk_tier():
+    """A tool missing from the registry defaults to blocked, not to allowed."""
+    for name in (
+        "attach_actor", "detach_actor", "set_actor_folder", "tag_actor",
+        "find_actors_by_tag", "select_actors", "get_selected_actors",
+    ):
+        assert name in security.TOOL_RISK_TIERS, name
+
+
+# --- snippet self-validation -------------------------------------------------
+#
+# guarded() embeds the body as a string literal inside exec(), so parsing the
+# outer expression never compiles it. A malformed body used to reach the editor
+# and fail there at compile time, arriving as RemoteCommandFailedError with an
+# empty log. These lock in the local check that replaced that.
+
+
+def test_guarded_rejects_a_body_that_does_not_compile():
+    """A dedented line inside an if-block is the exact failure that cost hours."""
+    body = "if True:\n    x = 1\ny = 2\n    z = 3"
+    with pytest.raises(SyntaxError) as excinfo:
+        remote_snippets.guarded(body)
+    assert "does not compile" in str(excinfo.value)
+
+
+def test_guarded_error_points_at_indent_block():
+    """The message should name the usual cause, not just the symptom."""
+    body = "if True:\n    x = 1\ny = 2\n    z = 3"
+    with pytest.raises(SyntaxError) as excinfo:
+        remote_snippets.guarded(body)
+    assert "indent_block" in str(excinfo.value)
+
+
+def test_guarded_accepts_a_well_formed_multiline_body():
+    body = "a = None\nif a is not None:\n    b = 1\nelse:\n    b = 2\nOUT = {'b': b}"
+    assert remote_snippets.guarded(body)
+
+
+def test_indent_block_indents_every_nonblank_line():
+    out = remote_snippets.indent_block("a = 1\nb = 2\n\nc = 3", 4)
+    assert out == "    a = 1\n    b = 2\n\n    c = 3"
+
+
+def test_indent_block_with_zero_spaces_is_identity():
+    assert remote_snippets.indent_block("a = 1\nb = 2", 0) == "a = 1\nb = 2"
+
+
+# --- collision ---------------------------------------------------------------
+
+
+def test_get_mesh_collision_info_reads_the_trace_flag_not_a_complexity(fake_bridge):
+    fake_bridge.result = {
+        "found": True, "complexity": "<CollisionTraceFlag.CTF_USE_DEFAULT: 0>",
+        "simple_count": 1, "convex_count": 0,
+    }
+    r = meshes.get_mesh_collision_info("/Game/M/C.M")
+    assert r["success"] is True
+    assert "CTF_USE_DEFAULT" in r["complexity"]
+
+
+def test_get_mesh_collision_info_reports_a_missing_asset(fake_bridge):
+    fake_bridge.result = {"found": False, "error": "Could not load", "complexity": None,
+                          "simple_count": None, "convex_count": None}
+    assert meshes.get_mesh_collision_info("/Game/Nope.Nope")["success"] is False
+
+
+@pytest.mark.parametrize("preset", ["spheroid", "", "CONVEX", None])
+def test_collision_preset_rejects_an_unknown_name(fake_bridge, preset):
+    r = meshes.set_mesh_collision_preset("/Game/M/C.C", preset, confirm=True)
+    assert r["success"] is False
+    assert "preset" in r["error"].lower()
+
+
+def test_collision_preset_rejects_an_unknown_shape(fake_bridge):
+    r = meshes.set_mesh_collision_preset("/Game/M/C.C", "simple", shape_type="DONUT", confirm=True)
+    assert r["success"] is False
+    assert "shape_type" in r["error"]
+
+
+def test_collision_preset_rejects_a_zero_hull_count(fake_bridge):
+    assert meshes.set_mesh_collision_preset("/Game/M/C.C", "convex", hull_count=0, confirm=True)["success"] is False
+
+
+def test_collision_preset_needs_confirm(fake_bridge):
+    with pytest.raises(security.SecurityViolation):
+        meshes.set_mesh_collision_preset("/Game/M/C.C", "none")
+
+
+def test_collision_preset_validates_before_dispatch(fake_bridge):
+    """A bad preset must not reach the editor at all."""
+    meshes.set_mesh_collision_preset("/Game/M/C.C", "nope", confirm=True)
+    assert fake_bridge.last_expr is None
+
+
+def test_convex_preset_uses_the_decomposition_call(fake_bridge):
+    fake_bridge.result = {"found": True, "ok": True, "complexity": "CTF_USE_DEFAULT",
+                          "simple_count": 0, "convex_count": 4}
+    meshes.set_mesh_collision_preset("/Game/M/C.C", "convex", hull_count=4, confirm=True)
+    snippet = fake_bridge.last_expr
+    assert "set_convex_decomposition_collisions" in snippet
+    assert "StaticMeshEditorSubsystem" in snippet
+
+
+def test_simple_preset_uses_the_shape_enum(fake_bridge):
+    fake_bridge.result = {"found": True, "ok": True, "complexity": "x",
+                          "simple_count": 1, "convex_count": 0}
+    meshes.set_mesh_collision_preset("/Game/M/C.C", "simple", shape_type="SPHERE", confirm=True)
+    assert "ScriptCollisionShapeType.SPHERE" in fake_bridge.last_expr
+
+
+# --- import guards -----------------------------------------------------------
+
+
+def test_import_refuses_a_missing_source_file(fake_bridge):
+    with pytest.raises(security.SecurityViolation):
+        meshes.import_static_mesh("/tmp/definitely_not_here.obj")
+
+
+def test_import_refuses_a_non_importable_suffix(tmp_path):
+    bad = tmp_path / "payload.py"
+    bad.write_text("x = 1\n")
+    with pytest.raises(security.SecurityViolation):
+        meshes.import_static_mesh(str(bad))
+
+
+def test_import_refuses_an_engine_destination(tmp_path):
+    """
+    /Engine is engine content. A tool that can write there corrupts the install
+    rather than the project.
+    """
+    obj = tmp_path / "m.obj"
+    obj.write_text("v 0 0 0\nv 1 0 0\nv 0 1 0\nf 1 2 3\n")
+    with pytest.raises(security.SecurityViolation):
+        meshes.import_static_mesh(str(obj), "/Engine/Somewhere")
+
+
+def test_import_allows_a_game_destination(tmp_path, fake_bridge):
+    obj = tmp_path / "m.obj"
+    obj.write_text("v 0 0 0\nv 1 0 0\nv 0 1 0\nf 1 2 3\n")
+    fake_bridge.result = {"found": True, "error": None,
+                          "imported_paths": ["/Game/M/M.M"], "asset_paths": ["/Game/M/M.M"]}
+    assert meshes.import_static_mesh(str(obj), "/Game/MCPTest")["success"] is True
+
+
+def test_import_reports_failure_when_nothing_was_produced(fake_bridge, tmp_path):
+    """
+    import_asset_tasks returns None either way, so an empty
+    imported_object_paths is the only failure signal available.
+    """
+    obj = tmp_path / "m.obj"
+    obj.write_text("v 0 0 0\nv 1 0 0\nv 0 1 0\nf 1 2 3\n")
+    fake_bridge.result = {"found": True, "error": None, "imported_paths": [], "asset_paths": []}
+    r = meshes.import_static_mesh(str(obj))
+    assert r["success"] is False
+    assert "no asset" in r["error"].lower()
+
+
+def test_import_does_not_double_the_object_path(tmp_path, fake_bridge):
+    """imported_object_paths are already full object paths."""
+    obj = tmp_path / "m.obj"
+    obj.write_text("v 0 0 0\nv 1 0 0\nv 0 1 0\nf 1 2 3\n")
+    fake_bridge.result = {
+        "found": True, "error": None,
+        "imported_paths": ["/Game/M/M.M"], "asset_paths": ["/Game/M/M.M"],
+    }
+    r = meshes.import_static_mesh(str(obj))
+    assert r["asset_paths"] == ["/Game/M/M.M"]
+    assert ".M.M.M" not in r["asset_paths"][0]
+
+
+def test_import_names_the_asset_after_the_file_stem(tmp_path, fake_bridge):
+    obj = tmp_path / "MyMesh.obj"
+    obj.write_text("v 0 0 0\nv 1 0 0\nv 0 1 0\nf 1 2 3\n")
+    fake_bridge.result = {"found": True, "error": None,
+                          "imported_paths": ["/Game/M/MyMesh.MyMesh"],
+                          "asset_paths": ["/Game/M/MyMesh.MyMesh"]}
+    assert meshes.import_static_mesh(str(obj))["destination_name"] == "MyMesh"
+
+
+def test_skeletal_import_sets_the_skeletal_flag(tmp_path, fake_bridge):
+    fbx = tmp_path / "rig.fbx"
+    fbx.write_bytes(b"Kaydara FBX Binary  \x00")
+    fake_bridge.result = {"found": True, "error": None,
+                          "imported_paths": ["/Game/M/rig.rig"], "asset_paths": ["/Game/M/rig.rig"]}
+    meshes.import_skeletal_mesh(str(fbx))
+    assert "import_as_skeletal = True" in fake_bridge.last_expr
+
+
+# --- material domain ---------------------------------------------------------
+
+
+def test_material_domain_change_needs_confirm(fake_bridge):
+    with pytest.raises(security.SecurityViolation):
+        materials.set_material_domain_and_shading_model("/Game/M/M.M", domain="MD_UI")
+
+
+def test_material_domain_requires_at_least_one_argument(fake_bridge):
+    r = materials.set_material_domain_and_shading_model("/Game/M/M.M", confirm=True)
+    assert r["success"] is False
+
+
+def test_material_domain_rejects_an_unknown_domain(fake_bridge):
+    r = materials.set_material_domain_and_shading_model("/Game/M/M.M", domain="MD_NOPE", confirm=True)
+    assert r["success"] is False
+    assert "MD_NOPE" in r["error"]
+
+
+def test_material_domain_builds_only_the_enum_it_is_given(fake_bridge):
+    """
+    Regression: interpolating both enum members unconditionally emitted
+    `MaterialShadingModel.None` when only the domain was being changed, which
+    does not compile and used to surface as an empty-log editor failure.
+    """
+    fake_bridge.result = {"found": True, "domain_before": "<MaterialDomain.MD_SURFACE: 0>",
+                          "shading_before": "<MaterialShadingModel.MSM_DEFAULT_LIT: 1>",
+                          "domain_after": "<MaterialDomain.MD_UI: 5>",
+                          "shading_after": "<MaterialShadingModel.MSM_DEFAULT_LIT: 1>"}
+    materials.set_material_domain_and_shading_model("/Game/M/M.M", domain="MD_UI", confirm=True)
+    snippet = fake_bridge.last_expr
+    assert "MaterialDomain.MD_UI" in snippet
+    assert "MaterialShadingModel" not in snippet
+
+
+def test_material_shading_model_alone_omits_the_domain_enum(fake_bridge):
+    fake_bridge.result = {"found": True, "domain_before": "<MaterialDomain.MD_SURFACE: 0>",
+                          "shading_before": "<MaterialShadingModel.MSM_DEFAULT_LIT: 1>",
+                          "domain_after": "<MaterialDomain.MD_SURFACE: 0>",
+                          "shading_after": "<MaterialShadingModel.MSM_UNLIT: 0>"}
+    materials.set_material_domain_and_shading_model("/Game/M/M.M", shading_model="MSM_UNLIT", confirm=True)
+    snippet = fake_bridge.last_expr
+    assert "MaterialShadingModel.MSM_UNLIT" in snippet
+    assert "set_editor_property" in snippet
+
+
+def test_material_domain_strips_the_enum_repr_before_comparing(fake_bridge):
+    """The read-back is '<MaterialDomain.MD_UI: 5>', not 'MD_UI'."""
+    fake_bridge.result = {"found": True, "domain_before": "<MaterialDomain.MD_SURFACE: 0>",
+                          "shading_before": "<MaterialShadingModel.MSM_DEFAULT_LIT: 1>",
+                          "domain_after": "<MaterialDomain.MD_UI: 5>",
+                          "shading_after": "<MaterialShadingModel.MSM_DEFAULT_LIT: 1>"}
+    r = materials.set_material_domain_and_shading_model("/Game/M/M.M", domain="MD_UI", confirm=True)
+    assert r["success"] is True
+    assert r["domain_after"] == "MD_UI"
+
+
+def test_material_domain_reports_a_read_back_that_did_not_take(fake_bridge):
+    """If the value did not stick, that is a failure, not a success."""
+    fake_bridge.result = {"found": True, "domain_before": "<MaterialDomain.MD_SURFACE: 0>",
+                          "shading_before": "<MaterialShadingModel.MSM_DEFAULT_LIT: 1>",
+                          "domain_after": "<MaterialDomain.MD_SURFACE: 0>",
+                          "shading_after": "<MaterialShadingModel.MSM_DEFAULT_LIT: 1>"}
+    r = materials.set_material_domain_and_shading_model("/Game/M/M.M", domain="MD_UI", confirm=True)
+    assert r["success"] is False
+
+
+def test_texture_import_sets_srgb_on_the_asset_not_the_factory(tmp_path, fake_bridge):
+    """
+    TextureFactory exposes no `srgb`, so setting it there raised AttributeError.
+    The property belongs to the imported Texture2D.
+    """
+    png = tmp_path / "s.png"
+    png.write_bytes(b"\x89PNG\r\n\x1a\n")
+    fake_bridge.result = {"found": True, "error": None,
+                          "asset_path": "/Game/M/s.s", "size_x": 4, "size_y": 4,
+                          "srgb": "True", "compression": "TC_DEFAULT"}
+    r = materials.import_texture(str(png), srgb=False)
+    assert r["success"] is True
+    snippet = fake_bridge.last_expr
+    assert "tex.set_editor_property('srgb', False)" in snippet
+    assert "fact.srgb" not in snippet
+
+
+def test_every_new_tool_has_a_risk_tier():
+    for name in (
+        "get_mesh_collision_info", "set_mesh_collision_preset",
+        "import_static_mesh", "import_skeletal_mesh", "import_texture",
+        "set_material_domain_and_shading_model",
+    ):
+        assert name in security.TOOL_RISK_TIERS, name
+
+
+def test_run_python_accepts_a_per_call_timeout():
+    """Domain changes recompile shaders and overrun the default 8s."""
+    import inspect
+    sig = inspect.signature(bridge.UnrealBridge.run_python)
+    assert "timeout" in sig.parameters
+
+
+# --- skeletal mesh support ---------------------------------------------------
+
+
+def test_mesh_bounds_asks_skeletal_meshes_a_different_question(monkeypatch, fake_bridge):
+    """
+    SkeletalMesh has no get_bounding_box; it has get_bounds returning a
+    BoxSphereBounds. Asking the StaticMesh way raised AttributeError.
+    """
+    monkeypatch.setattr(
+        fake_bridge, "result",
+        {"found": True, "mesh": "SK", "mesh_class": "SkeletalMesh", "lod_count": 1,
+         "min": [-1, -1, -1], "max": [1, 1, 1], "sphere_radius": 1.73},
+    )
+    r = meshes.get_mesh_bounds("/Game/M/SK.SK")
+    assert r["success"] is True
+    assert r["mesh_class"] == "SkeletalMesh"
+    assert r["sphere_radius"] == 1.73
+
+
+def test_mesh_bounds_uses_the_static_path_for_static_meshes(monkeypatch, fake_bridge):
+    monkeypatch.setattr(
+        fake_bridge, "result",
+        {"found": True, "mesh": "SM", "mesh_class": "StaticMesh", "lod_count": 2,
+         "min": [-50, -50, -50], "max": [50, 50, 50], "sphere_radius": None},
+    )
+    r = meshes.get_mesh_bounds("/Game/M/SM.SM")
+    assert r["size"] == [100, 100, 100]
+    assert r["extent"] == [50, 50, 50]
+    assert r["sphere_radius"] is None
+
+
+def test_mesh_bounds_normalizes_skeletal_origin_extent_into_min_max(monkeypatch, fake_bridge):
+    """A SkeletalMesh reports a centre and a half-size, not two corners."""
+    monkeypatch.setattr(
+        fake_bridge, "result",
+        {"found": True, "mesh": "SK", "mesh_class": "SkeletalMesh", "lod_count": 1,
+         "min": [0.0, 0.0, 0.0], "max": [2.0, 2.0, 2.0], "sphere_radius": 1.73},
+    )
+    r = meshes.get_mesh_bounds("/Game/M/SK.SK")
+    assert r["min"] == [0.0, 0.0, 0.0]
+    assert r["max"] == [2.0, 2.0, 2.0]
+    assert r["extent"] == [1.0, 1.0, 1.0]
+
+
+def test_mesh_bounds_reports_a_mesh_with_no_bounds_instead_of_crashing(monkeypatch, fake_bridge):
+    monkeypatch.setattr(
+        fake_bridge, "result",
+        {"found": True, "mesh": "M", "mesh_class": "Mystery", "lod_count": 1,
+         "min": None, "max": None, "sphere_radius": None},
+    )
+    r = meshes.get_mesh_bounds("/Game/M/M.M")
+    assert r["success"] is False
+    assert "Mystery" in r["error"]

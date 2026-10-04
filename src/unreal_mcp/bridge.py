@@ -94,7 +94,11 @@ class UnrealBridge:
     def disconnect(self) -> None:
         self._connected = False
 
-    def _call_execute_python_command_ex(self, code: str) -> dict[str, Any]:
+    def _call_execute_python_command_ex(
+        self,
+        code: str,
+        timeout: float | None = None,
+    ) -> dict[str, Any]:
         self.connect()
         payload: dict[str, Any] = {
             "objectPath": _PYTHON_LIBRARY_OBJECT_PATH,
@@ -112,7 +116,7 @@ class UnrealBridge:
         response = requests.put(
             f"{self._base_url}/remote/object/call",
             json=payload,
-            timeout=self._timeout,
+            timeout=timeout if timeout is not None else self._timeout,
         )
         try:
             data = response.json()
@@ -143,14 +147,19 @@ class UnrealBridge:
         """
         return self._call_execute_python_command_ex(code)
 
-    def run_python(self, expression: str) -> Any:
+    def run_python(self, expression: str, timeout: float | None = None) -> Any:
         """
         Evaluates a single Python expression inside the connected Unreal
         Editor and returns the decoded JSON value. The caller is responsible
         for wrapping the expression in json.dumps(...) on the remote side,
         e.g. run_python("__import__('json').dumps(1 + 1)") -> 2.
+
+        Pass timeout for anything that can make the editor block longer than the
+        default 8s. Changing a material's domain recompiles its shaders on save,
+        which routinely overruns it; the editor call succeeds, but the client
+        gives up first and reports a ReadTimeout that reads like a failure.
         """
-        data = self._call_execute_python_command_ex(expression)
+        data = self._call_execute_python_command_ex(expression, timeout=timeout)
 
         if not data.get("ReturnValue"):
             log = data.get("LogOutput", [])

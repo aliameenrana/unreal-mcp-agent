@@ -61,6 +61,8 @@ mcp.add_tool(_wrap(materials.create_material_instance))
 mcp.add_tool(_wrap(materials.set_material_scalar_parameter))
 mcp.add_tool(_wrap(materials.set_material_vector_parameter))
 mcp.add_tool(_wrap(materials.set_material_texture_parameter))
+mcp.add_tool(_wrap(materials.set_material_domain_and_shading_model))
+mcp.add_tool(_wrap(materials.import_texture))
 mcp.add_tool(_wrap(materials.get_material_parameter_list))
 
 # Blueprints
@@ -72,6 +74,15 @@ mcp.add_tool(_wrap(components.remove_component))
 mcp.add_tool(_wrap(components.set_component_property))
 mcp.add_tool(_wrap(components.list_components))
 
+# Scene graph / selection
+mcp.add_tool(_wrap(scene.attach_actor))
+mcp.add_tool(_wrap(scene.detach_actor))
+mcp.add_tool(_wrap(scene.set_actor_folder))
+mcp.add_tool(_wrap(scene.tag_actor))
+mcp.add_tool(_wrap(scene.find_actors_by_tag))
+mcp.add_tool(_wrap(scene.select_actors))
+mcp.add_tool(_wrap(scene.get_selected_actors))
+
 # Assets
 mcp.add_tool(_wrap(assets.asset_exists))
 mcp.add_tool(_wrap(assets.delete_asset))
@@ -79,6 +90,10 @@ mcp.add_tool(_wrap(assets.delete_asset))
 # Meshes
 mcp.add_tool(_wrap(meshes.get_mesh_bounds))
 mcp.add_tool(_wrap(meshes.set_mesh_lods))
+mcp.add_tool(_wrap(meshes.get_mesh_collision_info))
+mcp.add_tool(_wrap(meshes.set_mesh_collision_preset))
+mcp.add_tool(_wrap(meshes.import_static_mesh))
+mcp.add_tool(_wrap(meshes.import_skeletal_mesh))
 
 # Lighting
 mcp.add_tool(_wrap(lighting.set_light_properties))
