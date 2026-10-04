@@ -53,6 +53,22 @@ def main() -> int:
     found = any(a["name"] == actor_name for a in result["actors"])
     print("OK: found it." if found else "UNEXPECTED: not found in the list.")
 
+    print(f"\nCalling set_actor_transform() to move {actor_name} to (100, 200, 300)...")
+    try:
+        transform_result = scene.set_actor_transform(actor_name, location=(100, 200, 300))
+    except RemoteCommandFailedError as exc:
+        print(f"FAILED: {exc}")
+        return 1
+    print(f"OK: {transform_result}")
+
+    print(f"\nCalling set_property() to set custom_time_dilation on {actor_name}...")
+    try:
+        prop_result = scene.set_property(actor_name, "custom_time_dilation", 2.5)
+    except RemoteCommandFailedError as exc:
+        print(f"FAILED: {exc}")
+        return 1
+    print(f"OK: {prop_result}")
+
     print(f"\nCleaning up: deleting {actor_name}...")
     delete_result = scene.delete_actor(actor_name, confirm=True)
     print(f"OK: {delete_result}")

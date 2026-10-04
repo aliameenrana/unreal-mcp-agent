@@ -8,10 +8,44 @@ See [PLAN.md](PLAN.md) for the full architecture, scope, and security design.
 
 ## Status
 
-Fully working end to end against a live Unreal Editor 5.8 session:
-`list_actors`, `spawn_actor`, and `delete_actor` all confirmed via
-`scripts/smoke_test.py` against a real, non-trivial level (138 actors). All
-24 unit tests pass (security bouncer, snippet syntax).
+The full MVP tool set is confirmed working end to end against a live Unreal
+Editor 5.8 session, each one exercised against a real, non-trivial level
+(138 actors) and cleaned up afterward:
+
+- `list_actors`, `spawn_actor`, `delete_actor`, `set_actor_transform`,
+  `set_property` (`scripts/smoke_test.py` covers the first three plus
+  transform and property mutation).
+- `create_material`, `create_material_instance`,
+  `set_material_scalar_parameter`, `set_material_vector_parameter`.
+- `compile_blueprint`, against a real Blueprint asset created for the test.
+- `set_mesh_material_slot` / `get_mesh_material_slot`, per-actor
+  `MaterialInstanceDynamic` assignment, verified by reading the slot back
+  through `get_material()` and confirming the instance's parent.
+- `set_light_properties`, `set_sky_atmosphere_params`,
+  `set_exponential_fog_params` and their three getters, verified by reading
+  each component's properties back by name after the write.
+- `light_scene_preset` (all four moods), `set_dressing_pass`,
+  `apply_material_variant_set`.
+
+23 tools are registered with the MCP server, each one carrying a risk tier in
+`security.py`.
+
+Three correctness notes from live testing, all of them silent failures rather
+than errors:
+
+- `set_property` sets a raw Python attribute via `setattr`, which only works
+  for genuine UPROPERTY fields exposed under their Python (snake_case) name,
+  e.g. `custom_time_dilation`. Some engine-side names look settable but are
+  not (`hidden` is a read-only accessor backed by `bHidden`; use a dedicated
+  method like `set_actor_hidden_in_game` for those).
+- `setattr` is rejected outright on light and fog component properties. Those
+  tools use `set_editor_property`.
+- Subscripting a lambda's result, as in `(lambda c: ...)[-1]`, compiles but
+  makes CPython emit a SyntaxWarning, which Unreal reports through
+  `LogOutput` alongside an empty return value, so the remote call looks like
+  it failed. Index the tuple inside the lambda body instead;
+  `lighting._apply_to_component` is the pattern, and a test asserts no
+  generated snippet does it.
 
 `src/unreal_mcp/bridge.py` was originally written against Unreal's built-in
 Python Remote Execution protocol (UDP multicast discovery + TCP). That
@@ -23,8 +57,14 @@ below. The tool modules in `src/unreal_mcp/tools/` were unaffected by the
 switch, since they only call `bridge.run_python()`, never the transport
 directly.
 
-`compile_blueprint` (in `tools/blueprints.py`) has not been exercised
-against a live editor yet and remains the least-verified call.
+One correctness note from live testing: `set_property` sets a raw Python
+attribute via `setattr`, which only works for genuine UPROPERTY fields
+exposed under their Python (snake_case) name — e.g. `custom_time_dilation`.
+Some engine-side names look settable but are not (`hidden` is a read-only
+accessor backed by `bHidden`; use a dedicated method like
+`set_actor_hidden_in_game` for those). This is normal Unreal Python API
+behavior, not a bug in the tool, but it means callers need the real
+property name, not the Blueprint-editor display name.
 
 ## Setup
 
@@ -34,13 +74,10 @@ source .venv/bin/activate
 pip install -e .
 ```
 
-Requires Unreal Engine 5 installed locally. The server finds it automatically
-under `/Users/Shared/Epic Games/UE_*` (macOS) or `C:/Program Files/Epic
-Games` (Windows). If yours is somewhere else, set:
-
-```bash
-export UNREAL_ENGINE_ROOT="/path/to/UE_5.8"
-```
+Requires Unreal Engine 5 installed locally, with the editor running (the
+server connects to its Remote Control HTTP endpoint on 127.0.0.1:30010). No
+engine path needs configuring; the server talks to the editor over that one
+local endpoint.
 
 ### Enable Remote Control API in your Unreal project
 

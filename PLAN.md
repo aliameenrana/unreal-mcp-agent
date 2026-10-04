@@ -97,6 +97,428 @@ Unreal's Python Remote Execution has **zero sandboxing** — it's a full interpr
 
 ---
 
+## Full tool catalog (target surface, not all built yet)
+
+The MVP above is the floor. This is the ceiling: every domain a Phase 2
+orchestrator would otherwise have to improvise against with raw
+`execute_python` calls, which is exactly the try-and-fail loop we want to
+avoid. A named, tested tool beats a generated snippet because the agent
+gets a stable contract (fixed arguments, fixed return shape, pre-verified
+against a live editor) instead of re-deriving the right API call, and
+re-discovering its edge cases, every single time it needs the same
+capability.
+
+Each line names the tool and the underlying Unreal Python API it wraps.
+Grouped by domain; order within a domain is rough build priority.
+
+### Actors and scene graph
+
+- `spawn_actor`, `delete_actor`, `list_actors`, `get_scene_state` — done (MVP).
+
+**`unreal.Rotator` takes `(roll, pitch, yaw)` positionally, not
+`(pitch, yaw, roll)`.** Every tool here documents its rotation argument as
+`(pitch, yaw, roll)` and builds the Rotator by keyword via
+`remote_snippets.rotator()`; a positional build tilts the actor instead of
+turning it and raises nothing. This was live in `spawn_actor` and
+`set_actor_transform` until it was caught, and it is the same failure mode as
+the `unreal.Color` `(b, g, r, a)` case that TOOL_BUILDING_GUIDE.md documents.
+Any struct built from a tool argument should be built by keyword for the same
+reason.
+- `set_actor_transform`, `set_property`, `get_property`, all done. Read-back is as
+  important as write.
+  `get_property` is the read side of that pair and returns non-scalar values
+  too: enums as their name, `Vector` as `[x, y, z]`, `Rotator` and the color
+  types as named-field dicts, object references as `{class, name}`. Two things
+  it has to work around, both confirmed by probe:
+  - Almost nothing Unreal returns is JSON-serializable. `json.dumps` on a
+    `Vector` raises `TypeError`, and an enum stringifies to
+    `"<NetDormancy.DORM_AWAKE: 1>"` instead of `DORM_AWAKE`, so a conversion
+    layer (`remote_snippets.jsonable`) sits between the read and `json.dumps`.
+  - `unreal.Array` is a `MutableSequence`, **not** a `list`. An
+    `isinstance(v, (list, tuple))` check silently misses every
+    `Array[Name]`/`Array[X]` property and returns a repr string as if it were
+    the value.
+  - An unknown property name raises rather than returning a sentinel, and
+    `bridge.run_python` reports any raise as a `RemoteCommandFailedError` with
+    an empty `LogOutput`, so the reason would otherwise be invisible. The call
+    runs inside `remote_snippets.guarded()`, which turns the raise into
+    `{"success": False, "error": ...}`.
+  - Presence must **not** be checked with `dir(actor)`: `layers` and
+    `replicate_movement` are both documented `Actor` properties that `dir()`
+    omits and that `get_editor_property` reads fine.
+- `duplicate_actor`, wrapping `EditorActorSubsystem.duplicate_actor`, done.
+  Two things to know: a zero offset stacks the copy exactly on the original,
+  so the tool defaults to a 100-unit X offset; and passing it a null actor
+  takes the editor down rather than returning the documented "none if it
+  didn't succeed", so the tool resolves the actor to None first and reports a
+  missing actor as an error instead.
+- `attach_actor` / `detach_actor` — `Actor.attach_to_actor` / `detach_from_actor`, socket support.
+- `set_actor_folder` — `Actor.set_folder_path`, for scene organization.
+- `tag_actor` / `find_actors_by_tag` — `Actor.tags`, `EditorActorSubsystem.get_selected_level_actors` filtered.
+- `set_actor_parent_component` — component hierarchy edits, not just actor-level.
+- `group_actors` / `ungroup_actors` — `EditorActorSubsystem` grouping calls.
+- `select_actors` / `get_selected_actors` — drives viewport selection state the agent can reason about.
+
+### Components
+
+All four done: `add_component`, `remove_component`, `list_components`,
+`set_component_property`.
+
+**Neither API named here exists in this engine version.** `Actor.add_component_by_class`
+and `Actor.destroy_component` are both absent; `dir()` on a live Actor has no
+member that adds a component at all, and the only `add_component` matches
+anywhere in the Python API belong to ControlRig, AnimOptimus, and K2Node. What
+works instead, confirmed live:
+
+- add: `unreal.new_object(ComponentClass, actor, name)`, which attaches the
+  component immediately (component count went up on the same call).
+- remove: `ActorComponent.destroy_component(component)`, passing the component
+  itself. Its own docstring warns against using it on an actor-owned component
+  "unless the owning actor is calling the function", which is what happens here
+  and it worked, but it is not the sanctioned path.
+
+Both are the kind of call that reports success and leaves nothing behind, so
+each was read back through `list_components` rather than trusted: the component
+count and the surviving component names were compared against an independent
+`get_all_level_actors_components()` query filtered by outer actor.
+
+### Meshes and geometry
+
+- `set_mesh_material_slot` / `get_mesh_material_slot`, done (see Components).
+- `get_mesh_bounds`, done. Wraps `StaticMesh.get_bounding_box()`, which
+  returns a `Box` of two corner `Vector`s, not an origin/extent pair. Local
+  space, so it does not move when an actor using the mesh moves. Note
+  `Vector` is not iterable in this Python build, so the corners have to be read
+  as `.x` / `.y` / `.z`; a comprehension over one fails.
+- `generate_lods`, **not buildable as named.** `EditorStaticMeshLibrary.generate_lods`
+  does not exist. The real call is `set_lods(static_mesh, reduction_options)`,
+  wrapped by `set_mesh_lods`, which takes `percent_triangles` as a list of
+  **fractions 0.0-1.0**, one per generated LOD (0.5 and 0.2 gives two extra
+  LODs at half and a fifth of the triangles). There is no
+  `StaticMeshReductionOptions.percent_triangle_reduction` field; the
+  percentage lives on `StaticMeshReductionSettings.percent_triangles`.
+- `import_static_mesh` / `import_skeletal_mesh`, buildable via
+  `AssetImportTask` (`filename`, `destination_path`, `destination_name`,
+  `options`, `automated`, `replace_existing`, and an `imported_object_paths`
+  result field) plus `AssetToolsHelpers.get_asset_tools().import_asset_tasks`.
+  **Not yet built or verified**: verifying it needs a source FBX, and the test
+  project has none.
+- `set_collision_complexity`, **not buildable as named.** No
+  `set_collision_complexity` and no `CollisionComplexity` symbol exists
+  anywhere in the Python API for this build. The nearest real calls are
+  `EditorStaticMeshLibrary.set_convex_decomposition_collisions` and
+  `remove_collisions`.
+
+### Materials and textures — this is a bigger domain than the MVP list suggests
+
+Materials are the single area where an LLM is most likely to fall into a
+guess-and-fail loop, because a material graph is a real node graph with
+typed pins, not a flat property bag. The parameter-setting tools already
+built only cover Material *Instances*; they say nothing about building the
+underlying Material graph itself, which is where most of the actual
+authoring work happens.
+
+- `create_material`, `create_material_instance`, `set_material_scalar_parameter`, `set_material_vector_parameter` — done (MVP).
+- `set_material_texture_parameter`, done. Wraps
+  `MaterialEditingLibrary.set_material_instance_texture_parameter_value`,
+  which takes a `MaterialParameterAssociation` defaulting to `GLOBAL_PARAMETER`.
+- `get_material_parameter_list`, done. Wraps the four
+  `MaterialEditingLibrary.get_*_parameter_names` calls (scalar, vector,
+  texture, static switch) and reports `expression_count` alongside them, so a
+  blank material reads as "exposes nothing, graph has 0 nodes" rather than as
+  an empty success that could be mistaken for "no parameters exist".
+
+  **Correction to TOOL_BUILDING_GUIDE.md:** the guide's Example B tells you to
+  confirm a non-empty graph with
+  `MaterialEditingLibrary.get_all_material_expressions`. That function does not
+  exist in this build. The real names are `get_material_expressions` and
+  `get_num_material_expressions` (no `all_`).
+- `create_material_expression` — `MaterialEditingLibrary.create_material_expression`, the node-creation primitive (texture samplers, constants, math nodes, parameter nodes — one tool, a `node_type` argument).
+- `connect_material_expressions` / `connect_material_property` — `MaterialEditingLibrary.connect_material_expressions` and `connect_material_property`, wiring node output pins to input pins and to the final material output (base color, roughness, normal, etc.).
+- `layout_material_graph` — `MaterialExpression.material_expression_editor_x/y`, since Epic's own graph editor positions nodes and an agent-built graph that's all stacked at (0,0) is unreadable if a human ever opens it.
+- `set_material_domain_and_shading_model` — `Material.set_editor_property('material_domain', ...)`/`shading_model`, needed before a graph makes sense (surface vs. post-process vs. UI material).
+- `create_material_function` — reusable node subgraphs, `MaterialFunctionFactoryNew`, for anything built more than once.
+
+**Texture creation and editing — yes, this is possible, with caveats:**
+
+- `generate_texture_from_pixels` — `AssetToolsHelpers` + the Modeling Tools `CreateTextureObjectParams`/`UModelingObjectsCreationAPI.CreateTextureObject` path, builds a real `UTexture2D` asset from raw pixel data (an agent-generated gradient, noise pattern, flat color swatch, or a buffer handed in from an external image-gen step in Phase 2).
+- `set_texture_properties` — compression settings, sRGB flag, mip gen settings, `Texture2D.set_editor_property`.
+- `create_render_target` / `render_material_to_texture` — `MaterialEditingLibrary` has no direct bake-to-texture call in pure Python as of this writing; this likely needs `KismetRenderingLibrary.draw_material_to_render_target` plus a render target asset, confirm against a live editor before committing to the exact call shape.
+- `import_texture` — `AssetImportTask` with `TextureFactory`, for anything coming from outside the engine (the far more common path than pixel-buffer generation).
+- **What's realistically out of reach in pure Python:** procedural texture painting with brush strokes (that's the Texture Paint editor mode, mouse-driven); full node-graph texture generation tools like Substance-style graphs aren't natively in UE at all. Scope texture generation to "flat buffers in, `UTexture2D` out," not interactive painting.
+
+### Lighting
+
+- `set_light_properties` (intensity, color, temperature, source radius) — per light-component class — done, plus `get_light_properties`.
+- `build_lighting` — `EditorLevelLibrary` lightmass build trigger + completion poll, since this is slow and the agent needs to know when it's actually done, not just dispatched.
+- `set_sky_atmosphere_params` / `set_exponential_fog_params` — common "mood" controls for AI-driven scene dressing — done, plus `get_sky_atmosphere_params` / `get_exponential_fog_params`.
+
+Two API facts the lighting tools depend on, both confirmed by probe against
+the live 5.8 editor, because either one fails silently:
+
+- `setattr` is rejected on light and fog component properties. Every write
+  goes through `set_editor_property`; the dedicated `set_fog_density`-style
+  methods work too.
+- On `SkyAtmosphereComponent`, `ground_albedo` is an `unreal.Color` (whose
+  positional fields are `b, g, r, a`) while `rayleigh_scattering` and
+  `mie_scattering` are `unreal.LinearColor` (`r, g, b, a`). Two
+  same-intent color arguments with opposite channel order, on one class.
+  Both are built with keyword arguments in `tools/lighting.py`.
+
+`unreal.LinearColor`'s field order is also now confirmed as `(r, g, b, a)`,
+which closes the open question left in TOOL_BUILDING_GUIDE.md's gotcha 1.
+
+### Levels and world
+
+- `load_level` / `save_level` / `create_level` — `EditorLevelLibrary.load_level`, `save_current_level`, `new_level`.
+- `stream_level` (add/remove a sub-level) — `EditorLevelUtils.add_level_to_world`.
+- `set_world_partition_region_loaded` — for large open-world projects, load only the relevant cell instead of the whole map.
+- `get_level_bounds` — spatial awareness before placing actors.
+
+### Blueprints
+
+- `compile_blueprint` — done (MVP).
+- `create_blueprint` — `AssetToolsHelpers.get_asset_tools().create_asset(..., Blueprint, BlueprintFactory)`.
+- `add_blueprint_variable` — `BlueprintEditorLibrary.add_member_variable`.
+- `add_blueprint_function_call_node` / `add_blueprint_event_node` — graph editing via `K2Node` creation, the deferred "C++ plugin for graph wiring" extension from the original plan; likely the first thing that needs the C++ escape hatch since pure-Python Blueprint graph editing support is thin.
+- `get_blueprint_compile_errors` — parse the compiler log, not just success/fail, so the agent gets an actual error message to react to.
+- `set_blueprint_parent_class` — `BlueprintEditorLibrary.reparent_blueprint`.
+
+### Animation
+
+- `create_animation_blueprint` — `AssetToolsHelpers` + `AnimBlueprintFactory`.
+- `add_anim_state` / `add_anim_transition` — `AnimationStateMachineLibrary` (available in recent UE Python API).
+- `import_animation_sequence` — `AssetImportTask` with `FbxImportUI` animation settings.
+- `set_skeletal_mesh_physics_asset` — `SkeletalMesh.set_editor_property('physics_asset', ...)`.
+- `retarget_animation` — `AnimationLibrary`/IK Rig Python API (newer engine versions only; confirm availability before committing to this one).
+
+### Physics and collision
+
+- `set_simulate_physics` — `PrimitiveComponent.set_simulate_physics`.
+- `set_collision_profile` — `PrimitiveComponent.set_collision_profile_name`.
+- `set_collision_response` — per-channel overrides, `set_collision_response_to_channel`.
+- `add_physics_constraint` — `PhysicsConstraintComponent` setup between two components.
+- `create_physical_material` — `AssetToolsHelpers` + `PhysicalMaterialFactoryNew`, then friction/restitution properties.
+- `simulate_physics_step` (PIE-only) — paired with the PIE tool below, lets the agent actually watch physics behavior instead of guessing.
+
+### Niagara / VFX — mostly instance-level control, not graph authoring
+
+Niagara's actual module/script graph (the thing you see when you double-click
+a module inside the Niagara editor) is built on the same underlying node-graph
+system as Blueprints and Materials, and like Blueprint graphs, Python
+bindings for editing it node-by-node are not solidly documented. Scope the
+tool set to what's reliably scriptable: spawning, parameterizing, and
+assembling systems out of existing modules, not writing new HLSL-equivalent
+particle logic from scratch.
+
+- `spawn_niagara_system` — `NiagaraFunctionLibrary.spawn_system_at_location`.
+- `set_niagara_parameter` — `NiagaraComponent.set_variable_float`/`set_variable_vec3`/`set_variable_linear_color`/`set_variable_int`, the most-used call by far once a system exists (color, spawn rate, lifetime, velocity knobs exposed as user parameters).
+- `get_niagara_user_parameters` — discovery call, mirrors `get_material_parameter_list`'s role: list what a system actually exposes before guessing a name.
+- `create_niagara_system_asset` — scaffolds a new empty system, `NiagaraSystemFactoryNew`.
+- `add_niagara_emitter_from_template` — `NiagaraEditorModule`/`FNiagaraEditorUtilities` emitter templates (fountain, fire, smoke) are the realistic starting point for "build me an effect," since hand-assembling a particle system from bare modules is the single most repetitive, failure-prone task in Niagara even for human artists.
+- `set_niagara_renderer_material` — swap the sprite/mesh renderer's material reference, `NiagaraRendererProperties`.
+- **Explicitly out of scope for pure Python:** writing new Niagara modules/scripts, editing the particle update/spawn graphs node by node. If this is ever needed, it's a C++ plugin or Editor Utility Widget job, not a Python snippet.
+
+### Audio
+
+- `import_sound_wave` — `AssetImportTask` with `SoundFactory`.
+- `create_sound_cue` — `AssetToolsHelpers` + `SoundCueFactoryNew`, wire in a wave player node.
+- `play_sound_at_location` (PIE-only, for verification) — `GameplayStatics.play_sound_at_location`.
+- `set_sound_attenuation_settings` — distance/falloff config on a `SoundAttenuation` asset.
+
+### Asset management (general)
+
+- `import_asset` — generic `AssetImportTask` dispatcher (FBX, textures, audio, CSV data tables) behind one interface, since the per-type tools above all reduce to this.
+- `list_assets_in_path` — `EditorAssetLibrary.list_assets`.
+- `rename_asset` / `move_asset` / `duplicate_asset` — `EditorAssetLibrary` equivalents, each going through the existing path-allowlist security check.
+- `delete_asset` — already named as a destructive example in the security section; needs the same confirm-gate pattern as `delete_actor`.
+- `get_asset_references` / `get_asset_dependencies` — `AssetToolsHelpers.get_asset_tools().find_references`/dependency graph walk, important before any delete so the agent can see blast radius first.
+- `fix_up_redirectors` — `AssetToolsHelpers`, cleanup after moves/renames.
+
+### Data assets and structs
+
+- `create_data_table` — `AssetToolsHelpers` + `DataTableFactory`, from a CSV or JSON source.
+- `get_data_table_row` / `set_data_table_row` — `DataTableFunctionLibrary`.
+- `create_struct_asset` / `create_enum_asset` — `UserDefinedStructFactory`/`UserDefinedEnumFactory`, useful for agent-authored gameplay data.
+
+### Multiplayer and networking — mostly property flags, not a dedicated API
+
+There's no special "networking API" to wrap; replication is configured
+through ordinary UPROPERTY/UFUNCTION metadata that's visible and settable
+through the same `get_editor_property`/`set_editor_property` mechanism
+already used elsewhere. The value of naming these as tools isn't API
+novelty, it's that replication setup is extremely easy to get subtly wrong
+(forgetting to mark a function a RepNotify callback, mismatching a
+replication condition with how the property is actually used), so a tested
+tool that sets the whole correct bundle in one call is worth far more here
+than in domains where the raw API is already simple.
+
+- `set_actor_replicates` — `Actor.set_editor_property('replicates', True)` + `set_replicate_movement`, the two flags that are easy to set independently and forget one of.
+- `set_property_replication` — configures a Blueprint variable's replication condition (`None`/`OwnerOnly`/`SkipOwner`/etc.) via the Blueprint variable metadata API, since this is per-variable, not a single actor-level flag.
+- `add_rep_notify_function` — scaffolds the paired "mark variable ReplicatedUsing, create the matching `OnRep_<Name>` function stub" combination, because doing only half of this is a common, silent bug (the callback is referenced by name as a string internally; a typo doesn't error at compile time the way a C++ mismatch would).
+- `set_actor_network_relevancy` — `always_relevant`, `net_cull_distance_squared`, `min_net_update_frequency`, the "why isn't this actor showing up on remote clients" knobs.
+- `create_game_mode` / `set_default_game_mode` — `AssetToolsHelpers` + Blueprint parented to `GameModeBase`, then `WorldSettings.set_editor_property('default_game_mode', ...)`, since a multiplayer test is dead on arrival without this wired up first.
+- `verify_replication_setup` (read-only sanity check) — walks a Blueprint's variables/functions and flags properties that look like gameplay state (health, position, inventory count) but aren't marked replicated, and RepNotify functions whose paired variable isn't actually set to `ReplicatedUsing`. Not a guarantee, a lint pass; genuinely useful because this class of bug is invisible in a single-player PIE session and only shows up under a real network test.
+- **Out of scope / needs the C++ escape hatch:** Replication Graph configuration, custom `NetSerialize` implementations, anything below the Blueprint/property layer. Pure Python has no reach into the low-level replication driver.
+
+### MetaHuman — real, documented, and recent (MetaHuman 5.7 / Nov 2025)
+
+As of MetaHuman 5.7, shipped alongside Unreal Engine 5.7, Epic ships an
+actual Python/Blueprint API (`MetaHumanCharacterEditorSubsystem`) covering
+sculpting, conforming, wardrobe, rigging, and texture/assembly operations
+for batch automation — this isn't a guess or an extrapolation from
+unrelated APIs, it's the documented feature set. Requires UE 5.8+ and the
+MetaHuman Character plugin enabled. The common pattern across nearly every
+non-trivial call: register the character with the subsystem for editing,
+perform edits, commit each change (so it's reflected in the live viewport
+and serialized to the asset), then remove the character from the subsystem
+when done — a sequence worth wrapping once as a context-manager-style
+helper rather than repeating in every tool.
+
+- `create_metahuman_character` — instantiate a new `MetaHumanCharacter` asset from a preset/template.
+- `set_metahuman_body_type` / `sculpt_metahuman_body` — body conform and blend-space sculpting calls on the editor subsystem.
+- `set_metahuman_face_landmarks` — face sculpting via landmark manipulation, the programmatic equivalent of dragging control points in MetaHuman Creator.
+- `set_metahuman_skin_tone` / `set_metahuman_wardrobe_item` — material/wardrobe assembly calls.
+- `auto_rig_metahuman` — triggers the auto-rig request through the subsystem, this is the step that turns a sculpted character into something animatable.
+- `export_metahuman_to_level` — assembles and places the finished character as an actor, the natural hand-off point back into the rest of this tool set (it's now just an actor `set_actor_transform` etc. can operate on).
+- `batch_generate_metahuman_variants` — the actually-impressive one: given a base template and a list of parameter deltas (skin tone, body type, wardrobe), spit out N distinct characters in one call. This is squarely what the API was built for (batch automation) and is the kind of task that's brutally repetitive by hand.
+- Build this domain after the PIE/verification infrastructure, not before: a MetaHuman tool that silently produces a broken character (bad topology, missing rig) is worse than not having the tool, and the only way to catch that is rendering a viewport screenshot back for inspection.
+
+### Landscape and foliage
+
+- `sculpt_landscape_heightmap` — `LandscapeEditorObject`/`EditorLevelLibrary` heightmap import, or direct height data edits.
+- `paint_landscape_layer` — layer weight painting via `LandscapeProxy` API.
+- `add_foliage_type` / `paint_foliage_instances` — `InstancedFoliageActor`/`FoliageEditorSubsystem` (API coverage here is spotty; verify before committing to full scope).
+
+### Sequencer / cinematics
+
+- `create_level_sequence` — `AssetToolsHelpers` + `LevelSequenceFactoryNew`.
+- `add_actor_to_sequence` / `add_camera_cut_track` — `LevelSequenceEditorBlueprintLibrary`.
+- `add_keyframe` — `MovieSceneSequence` track/section API, for simple agent-driven cutscenes.
+- `render_sequence_to_movie` — `MoviePipelineQueueSubsystem`, genuinely useful output artifact for a build-and-show loop.
+
+### UMG / UI
+
+- `create_widget_blueprint` — `AssetToolsHelpers` + `WidgetBlueprintFactory`.
+- `add_widget_to_viewport` (PIE-only) — `WidgetBlueprintLibrary.create`.
+- `set_widget_text` / `set_widget_visibility` — generic `get_editor_property`/`set_editor_property` on resolved widget references.
+
+### Play-in-editor and verification (ties everything above together)
+
+- `launch_pie` / `stop_pie` — `EditorLevelLibrary.editor_play_simulate` or `UnrealEditorSubsystem` PIE control.
+- `capture_viewport_screenshot` — `AutomationLibrary.take_high_res_screenshot`, the already-ranked "good, close to core" extension.
+- `get_output_log` (filtered by severity/time window since last call) — makes the PIE loop actually useful: run, then read back what happened, not just that it launched.
+- `run_automation_test` — `AutomationController` Python bindings, if the project already has functional tests defined.
+
+### Project and build
+
+- `get_project_settings` / `set_project_setting` — narrow, allowlisted subset only (this is explicitly a security-sensitive surface, needs its own tier).
+- `package_project` — `subprocess`-free trigger via `AutomationTool` Python bindings if available, otherwise explicitly out of scope per the no-subprocess security rule.
+- `get_compile_errors` (C++ side, if the project has C++ modules) — likely requires the C++ plugin escape hatch, not pure Python.
+
+---
+
+## Presets: composite tools, not more primitives
+
+Everything above is a primitive: one tool, one Unreal API call (or a small
+cluster of calls needed to do one coherent thing). But a lot of real work is
+the *same sequence* of primitives, every time, with different parameters.
+If the orchestrator has to rediscover that sequence by chaining primitives
+itself on every run, we've just moved the try-and-fail loop up one layer
+instead of removing it. A preset is a single named tool, pre-written and
+pre-tested, that internally calls several primitives in the right order
+with the right error-handling between steps — the same reason named tools
+beat raw `execute_python` in the first place, applied recursively.
+
+Rule for what qualifies as a preset: it must be a sequence a human would
+actually do by hand, repeatedly, in roughly the same shape every time.
+Not "spawn 3 arbitrary actors," that's not a real recurring task. Things
+like these are:
+
+- `set_dressing_pass(theme, area_bounds)` — spawn + place + material-tint a
+  themed batch of scene objects (e.g. "clutter this room like a workshop"):
+  `spawn_actor` × N, `set_actor_transform` with randomized jitter within
+  bounds, `set_material_scalar_parameter` for variation. The single
+  highest-value preset for "make a small game" style prompts, since set
+  dressing is pure repetition by hand. Built as
+  `set_dressing_pass(class_path, count, center, radius, material_path=...)`:
+  the material-tint step is there, but driven by `set_mesh_material_slot`
+  (per-actor `MaterialInstanceDynamic`) rather than by
+  `set_material_scalar_parameter`, which writes to a shared instance asset and
+  so cannot vary one actor from another. There is no `theme` lookup table yet;
+  the caller passes the class and material paths directly.
+- `build_and_test_pie(level, duration_seconds)` — `launch_pie`,
+  `get_output_log` filtered to warnings/errors only, `capture_viewport_screenshot`,
+  `stop_pie`, bundled as one call returning a pass/fail verdict plus the
+  evidence. This is the actual build-test-fix loop Phase 2 needs, expressed
+  as a single tool instead of four calls the orchestrator has to sequence
+  and get the timing right on every time.
+- `create_pickup_item(mesh_path, blueprint_name, variable_name)` — a genuinely
+  common beginner-tutorial pattern: `create_blueprint` parented to Actor,
+  `add_component` (static mesh + collision sphere), `add_blueprint_variable`,
+  wire an overlap event to a "grant and destroy" sequence. Doing this by
+  hand in the editor is a 15-step tutorial; as a preset it's one call.
+- `setup_basic_multiplayer_actor(blueprint_name, replicated_properties)` —
+  `create_blueprint`, `set_actor_replicates`, `set_property_replication` for
+  each listed property, `add_rep_notify_function` where appropriate, then
+  `verify_replication_setup` as a built-in self-check before returning
+  success. Bundles the "easy to forget one flag" problem named above into
+  one call that can't partially forget a step.
+- `apply_material_variant_set(base_material, variants)` — given one base
+  Material and a list of `{name, scalar_overrides, vector_overrides,
+  texture_overrides}` dicts, creates one Material Instance per variant in a
+  single call. Common for anything with team colors, rarity tiers, or
+  damage-state skins — a flat list-comprehension-shaped task by hand that
+  shouldn't cost N separate tool round-trips.
+- `light_scene_preset(mood)` — named presets (`"daylight"`, `"interior_warm"`,
+  `"horror"`, `"golden_hour"`) that bundle `set_light_properties` +
+  `set_sky_atmosphere_params` + `set_exponential_fog_params` into one
+  defensible starting point, rather than the agent guessing intensity/color
+  values from scratch on every scene and iterating by trial and error.
+- `spawn_vfx_with_sound(niagara_system, sound_cue, location)` — the
+  "explosion," "pickup sparkle," "footstep dust" pattern: one Niagara spawn
+  plus one attenuated sound play, together, since these two are requested
+  together in practice far more often than either is requested alone.
+- `batch_import_asset_folder(folder_path, asset_type)` — walks a folder of
+  source files (FBX/PNG/WAV) and runs the right `import_asset` call on each
+  with sensible default import settings, instead of N individual import
+  calls for what is, by far, usually a "bring in this whole folder of art"
+  request rather than a one-off.
+
+### Where presets live in the architecture
+
+Presets are not a new transport or a new security tier; they're ordinary
+MCP tools in `src/unreal_mcp/tools/`, each one calling into the existing
+primitive functions directly (Python function calls within the server
+process) rather than round-tripping through `bridge.run_python()` per step
+unless a step genuinely needs fresh state read back from Unreal first. Each
+preset still goes through `security.enforce_tier()` same as any other tool,
+tiered at least as strict as its most destructive step. Build presets only
+after the primitives they depend on are live-verified individually; a
+preset built on an unverified primitive just compounds the untested surface
+instead of reducing it.
+
+### What this means for build order
+
+Not all of this gets built at once. Rough phasing, each phase live-verified
+before moving to the next, same discipline as the MVP:
+
+1. **Already done:** actors/scene graph core, materials core (instance parameters only), `compile_blueprint`.
+2. **Next, highest value per tool:** components, asset management (list/move/rename/delete with the dependency-check tool), lighting basics, mesh import, material graph authoring (`create_material_expression`/`connect_material_expressions`), replication flag tools.
+3. **Then:** physics/collision, landscape/foliage, data tables, Niagara instance-level control (spawn/parameter/template), multiplayer presets (`setup_basic_multiplayer_actor`).
+4. **Then, needs PIE infrastructure first:** play-in-editor launch/stop, screenshot capture, filtered log readback, texture generation (needs a viewport/asset check to confirm it actually looks right). This unlocks the actual build-test-fix loop Phase 2 depends on, so it should land before Phase 2 starts in earnest, not after.
+5. **Then, once primitives from phases 2–4 are live-verified:** the preset layer (`set_dressing_pass`, `build_and_test_pie`, `create_pickup_item`, `apply_material_variant_set`, `light_scene_preset`, etc.), since presets compound whatever primitives they call and are only worth building on a tested foundation.
+
+   Three of these were built ahead of that order, because every primitive
+   they call was already live-verified in phase 1: `light_scene_preset`,
+   `set_dressing_pass`, and `apply_material_variant_set`. `light_scene_preset`
+   needed the phase-2 lighting primitives, which were built first for exactly
+   that reason. The remaining presets still wait on phases 2–4.
+   `light_scene_preset` returns each primitive's getter output as read-back
+   evidence rather than asserting success from the setter's return value.
+6. **Last, and likely needs the C++ escape hatch or has thin Python coverage:** Blueprint graph node wiring, Niagara module/script graph editing, Sequencer keyframing, Animation Blueprint state machine editing, Replication Graph configuration.
+7. **MetaHuman, as its own track once PIE verification exists:** the API is real and documented (MetaHuman 5.7+, UE 5.8+) but every operation needs visual confirmation to catch silent failures (bad topology, missing rig), so it depends on phase 4's screenshot tooling rather than slotting in by API-maturity alone.
+
 ## Phase 2 preview (not building yet, just context)
 
 - Planning step: turn a loose prompt into a scoped task list (GDD-lite), not a blind "make a game."

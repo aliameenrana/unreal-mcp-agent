@@ -10,7 +10,17 @@ from __future__ import annotations
 from mcp.server.mcpserver import MCPServer
 
 from .security import SecurityViolation
-from .tools import blueprints, materials, python_exec, scene
+from .tools import (
+    assets,
+    blueprints,
+    components,
+    lighting,
+    materials,
+    meshes,
+    presets,
+    python_exec,
+    scene,
+)
 
 mcp = MCPServer(
     name="unreal-mcp",
@@ -39,6 +49,10 @@ mcp.add_tool(_wrap(scene.list_actors))
 mcp.add_tool(_wrap(scene.get_scene_state))
 mcp.add_tool(_wrap(scene.set_actor_transform))
 mcp.add_tool(_wrap(scene.set_property))
+mcp.add_tool(_wrap(scene.get_property))
+mcp.add_tool(_wrap(scene.duplicate_actor))
+mcp.add_tool(_wrap(scene.set_mesh_material_slot))
+mcp.add_tool(_wrap(scene.get_mesh_material_slot))
 mcp.add_tool(_wrap(scene.delete_actor))
 
 # Materials
@@ -46,9 +60,38 @@ mcp.add_tool(_wrap(materials.create_material))
 mcp.add_tool(_wrap(materials.create_material_instance))
 mcp.add_tool(_wrap(materials.set_material_scalar_parameter))
 mcp.add_tool(_wrap(materials.set_material_vector_parameter))
+mcp.add_tool(_wrap(materials.set_material_texture_parameter))
+mcp.add_tool(_wrap(materials.get_material_parameter_list))
 
 # Blueprints
 mcp.add_tool(_wrap(blueprints.compile_blueprint))
+
+# Components
+mcp.add_tool(_wrap(components.add_component))
+mcp.add_tool(_wrap(components.remove_component))
+mcp.add_tool(_wrap(components.set_component_property))
+mcp.add_tool(_wrap(components.list_components))
+
+# Assets
+mcp.add_tool(_wrap(assets.asset_exists))
+mcp.add_tool(_wrap(assets.delete_asset))
+
+# Meshes
+mcp.add_tool(_wrap(meshes.get_mesh_bounds))
+mcp.add_tool(_wrap(meshes.set_mesh_lods))
+
+# Lighting
+mcp.add_tool(_wrap(lighting.set_light_properties))
+mcp.add_tool(_wrap(lighting.set_sky_atmosphere_params))
+mcp.add_tool(_wrap(lighting.set_exponential_fog_params))
+mcp.add_tool(_wrap(lighting.get_light_properties))
+mcp.add_tool(_wrap(lighting.get_sky_atmosphere_params))
+mcp.add_tool(_wrap(lighting.get_exponential_fog_params))
+
+# Presets (composite tools that call the primitives above in-process)
+mcp.add_tool(_wrap(presets.light_scene_preset))
+mcp.add_tool(_wrap(presets.set_dressing_pass))
+mcp.add_tool(_wrap(presets.apply_material_variant_set))
 
 # Escape hatch
 mcp.add_tool(_wrap(python_exec.execute_python))

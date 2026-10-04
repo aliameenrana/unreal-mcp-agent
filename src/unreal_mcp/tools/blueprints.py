@@ -1,8 +1,10 @@
 """
-Blueprint compilation. This is the one call in the MVP set I'm least certain
-of without live verification: unreal.BlueprintEditorLibrary.compile_blueprint
-is documented in Epic's Python API reference, but exact behavior (return
-value, what it does on failure) needs confirming against a real editor.
+Blueprint compilation, wrapping unreal.BlueprintEditorLibrary.compile_blueprint.
+
+Verified against a live Unreal Editor 5.8 session on a real Blueprint asset.
+Note that success here means the compile call was dispatched and the editor
+accepted it, not that the resulting graph compiled without errors; reading
+that back is get_blueprint_compile_errors' job, which isn't built yet.
 """
 
 from __future__ import annotations

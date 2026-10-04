@@ -61,10 +61,15 @@ BANNED_CALL_NAMES = {
 # This is a heuristic, not a guarantee, since a string can be built
 # dynamically (e.g. via concatenation) to dodge a substring check. It catches
 # the common, unsophisticated case and is cheap to run.
+#
+# Traversal is matched as "../" (and its Windows spelling) rather than a bare
+# "..": a bare two-dot substring also rejects innocent strings like "0..10" or
+# "Foo..bar", which are not paths and carry no traversal risk.
 DANGEROUS_STRING_SUBSTRINGS = (
     ".git",
     ".github",
-    "..",
+    "../",
+    "..\\",
     ".ssh",
     ".env",
 )
@@ -157,12 +162,35 @@ TOOL_RISK_TIERS: dict[str, RiskTier] = {
     "list_actors": RiskTier.READ_ONLY,
     "get_scene_state": RiskTier.READ_ONLY,
     "spawn_actor": RiskTier.CONSTRUCTIVE,
+    "set_actor_transform": RiskTier.CONSTRUCTIVE,
     "set_property": RiskTier.CONSTRUCTIVE,
+    "get_property": RiskTier.READ_ONLY,
+    "asset_exists": RiskTier.READ_ONLY,
+    "get_material_parameter_list": RiskTier.READ_ONLY,
+    "set_material_texture_parameter": RiskTier.CONSTRUCTIVE,
+    "add_component": RiskTier.CONSTRUCTIVE,
+    "remove_component": RiskTier.DESTRUCTIVE,
+    "set_component_property": RiskTier.CONSTRUCTIVE,
+    "list_components": RiskTier.READ_ONLY,
+    "get_mesh_bounds": RiskTier.READ_ONLY,
+    "set_mesh_lods": RiskTier.DESTRUCTIVE,
+    "duplicate_actor": RiskTier.CONSTRUCTIVE,
+    "set_mesh_material_slot": RiskTier.CONSTRUCTIVE,
+    "get_mesh_material_slot": RiskTier.READ_ONLY,
     "create_material": RiskTier.CONSTRUCTIVE,
     "create_material_instance": RiskTier.CONSTRUCTIVE,
     "set_material_scalar_parameter": RiskTier.CONSTRUCTIVE,
     "set_material_vector_parameter": RiskTier.CONSTRUCTIVE,
     "compile_blueprint": RiskTier.CONSTRUCTIVE,
+    "set_light_properties": RiskTier.CONSTRUCTIVE,
+    "set_sky_atmosphere_params": RiskTier.CONSTRUCTIVE,
+    "set_exponential_fog_params": RiskTier.CONSTRUCTIVE,
+    "get_light_properties": RiskTier.READ_ONLY,
+    "get_sky_atmosphere_params": RiskTier.READ_ONLY,
+    "get_exponential_fog_params": RiskTier.READ_ONLY,
+    "light_scene_preset": RiskTier.CONSTRUCTIVE,
+    "set_dressing_pass": RiskTier.CONSTRUCTIVE,
+    "apply_material_variant_set": RiskTier.CONSTRUCTIVE,
     "delete_actor": RiskTier.DESTRUCTIVE,
     "delete_asset": RiskTier.DESTRUCTIVE,
     "execute_python": RiskTier.SYSTEM,  # gated separately via check_python_code, not blocked outright

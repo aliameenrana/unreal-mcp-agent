@@ -56,6 +56,17 @@ def test_blocks_path_traversal_literal():
         check_python_code("open('../../etc/passwd').read()")
 
 
+def test_blocks_windows_path_traversal_literal():
+    with pytest.raises(SecurityViolation):
+        check_python_code("open('..\\\\Windows\\\\system32').read()")
+
+
+def test_allows_double_dot_in_non_path_string():
+    # A bare ".." is not traversal; range and naming strings use it legitimately.
+    check_python_code("__import__('json').dumps(list(range(0, 11)))")
+    check_python_code("name = 'MyActor..bak'")
+
+
 def test_blocks_syntax_errors_cleanly():
     with pytest.raises(SecurityViolation):
         check_python_code("this is not : python(")
