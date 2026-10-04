@@ -140,8 +140,19 @@ def set_mesh_lods(
         "success": True,
         "mesh_path": mesh_path,
         "lods_generated": payload["generated"],
-        "lod_count": get_mesh_bounds(mesh_path)["lod_count"],
+        # A second round trip for the count, so it can come back unreadable even
+        # though the write succeeded. Indexing it unconditionally raised KeyError
+        # in that case; report the error instead.
+        **_lod_count_after(mesh_path),
     }
+
+
+def _lod_count_after(mesh_path: str) -> dict:
+    """Reads the LOD count back, tolerating a mesh that will not load."""
+    bounds = get_mesh_bounds(mesh_path)
+    if not bounds.get("success") or "lod_count" not in bounds:
+        return {"lod_count": None, "lod_count_error": bounds.get("error")}
+    return {"lod_count": bounds["lod_count"]}
 
 # ---------------------------------------------------------------------------
 # Collision
