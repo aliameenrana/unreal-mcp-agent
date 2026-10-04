@@ -14,6 +14,7 @@ from .tools import (
     assets,
     blueprints,
     components,
+    material_graph,
     lighting,
     materials,
     meshes,
@@ -63,6 +64,28 @@ mcp.add_tool(_wrap(materials.set_material_vector_parameter))
 mcp.add_tool(_wrap(materials.set_material_texture_parameter))
 mcp.add_tool(_wrap(materials.set_material_domain_and_shading_model))
 mcp.add_tool(_wrap(materials.import_texture))
+
+# Material graph authoring
+for _fn in (
+    material_graph.list_material_expressions,
+    material_graph.get_material_inputs,
+    material_graph.get_material_graph_stats,
+    material_graph.get_material_used_textures,
+    material_graph.find_material_parameter_usage,
+    material_graph.create_material_expression,
+    material_graph.create_material_parameter,
+    material_graph.connect_material_expressions,
+    material_graph.connect_material_input,
+    material_graph.disconnect_material_input,
+    material_graph.set_material_expression_property,
+    material_graph.get_material_expression_property,
+    material_graph.delete_material_expression,
+    material_graph.delete_unused_material_expressions,
+    material_graph.layout_material_graph,
+    material_graph.recompile_material_graph,
+    material_graph.set_material_static_switch_parameter,
+):
+    mcp.add_tool(_wrap(_fn))
 mcp.add_tool(_wrap(materials.get_material_parameter_list))
 
 # Blueprints
@@ -86,6 +109,7 @@ mcp.add_tool(_wrap(scene.get_selected_actors))
 # Assets
 mcp.add_tool(_wrap(assets.asset_exists))
 mcp.add_tool(_wrap(assets.delete_asset))
+mcp.add_tool(_wrap(assets.save_asset))
 
 # Meshes
 mcp.add_tool(_wrap(meshes.get_mesh_bounds))

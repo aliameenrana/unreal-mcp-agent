@@ -62,7 +62,7 @@ class UnrealBridge:
         self,
         host: str = "127.0.0.1",
         port: int = 30010,
-        timeout_seconds: float = 8.0,
+        timeout_seconds: float = 60.0,   # shader compiles routinely overrun a short default
     ) -> None:
         self._base_url = f"http://{host}:{port}"
         self._timeout = timeout_seconds

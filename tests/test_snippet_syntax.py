@@ -10,6 +10,7 @@ Separate from test_security.py, which tests the bouncer itself.
 from __future__ import annotations
 
 import ast
+import inspect
 import json
 import re
 import sys
@@ -126,12 +127,20 @@ def test_delete_actor_snippet_is_valid(fake_bridge):
     scene.delete_actor("Cube_0", confirm=True)
 
 
-def test_create_material_snippet_is_valid(fake_bridge):
+def test_create_material_snippet_is_valid(monkeypatch, fake_bridge):
+    monkeypatch.setattr(fake_bridge, "result",
+                        {"found": True, "error": None,
+                         "material_path": "/Game/Materials/M_Test"})
     materials.create_material("/Game/Materials", "M_Test")
 
 
-def test_create_material_instance_snippet_is_valid(fake_bridge):
-    materials.create_material_instance("/Game/Materials", "MI_Test", "/Game/Materials/M_Test")
+def test_create_material_instance_snippet_is_valid(monkeypatch, fake_bridge):
+    monkeypatch.setattr(fake_bridge, "result",
+                        {"found": True, "error": None,
+                         "instance_path": "/Game/Materials/MI_Test",
+                         "parent": "/Game/Materials/M_Test.M_Test"})
+    materials.create_material_instance("/Game/Materials", "MI_Test",
+                                       "/Game/Materials/M_Test.M_Test")
 
 
 def test_set_material_scalar_parameter_snippet_is_valid(fake_bridge):
@@ -163,7 +172,13 @@ def test_set_dressing_pass_snippet_is_valid(fake_bridge):
     presets.set_dressing_pass("/Script/Engine.StaticMeshActor", 2, (0, 0, 0), 100.0)
 
 
-def test_apply_material_variant_set_snippet_is_valid(fake_bridge):
+def test_apply_material_variant_set_snippet_is_valid(monkeypatch, fake_bridge):
+    # This tool creates its instances, so it needs the same dict payload the new
+    # create_material_instance returns.
+    monkeypatch.setattr(fake_bridge, "result",
+                        {"found": True, "error": None,
+                         "instance_path": "/Game/Materials/MI_Red",
+                         "parent": "/Game/Materials/M_Base.M_Base"})
     presets.apply_material_variant_set(
         "/Game/Materials",
         "/Game/Materials/M_Base",
@@ -591,11 +606,28 @@ def test_guarded_accepts_a_well_formed_multiline_body():
 
 def test_indent_block_indents_every_nonblank_line():
     out = remote_snippets.indent_block("a = 1\nb = 2\n\nc = 3", 4)
-    assert out == "    a = 1\n    b = 2\n\n    c = 3"
+    assert out == "    a = 1\n    b = 2\n\n    c = 3\n"
 
 
 def test_indent_block_with_zero_spaces_is_identity():
-    assert remote_snippets.indent_block("a = 1\nb = 2", 0) == "a = 1\nb = 2"
+    assert remote_snippets.indent_block("a = 1\nb = 2", 0) == "a = 1\nb = 2\n"
+
+
+def test_indent_block_always_ends_in_a_newline():
+    """
+    Every call site got this wrong individually: splicing a block that had no
+    trailing newline concatenated the next line onto the last, giving an
+    IndentationError inside the generated snippet.
+    """
+    assert remote_snippets.indent_block("a = 1", 4).endswith("\n")
+    assert remote_snippets.indent_block("a = 1\nb = 2", 8).endswith("\n")
+
+
+def test_indent_block_of_a_spliced_block_keeps_the_next_line_separate():
+    """The regression this exists for, stated as a test."""
+    block = remote_snippets.indent_block("x = 1\ny = 2", 4)
+    combined = f"if True:\n{block}    z = 3\n"
+    compile(combined, "<test>", "exec")
 
 
 # --- collision ---------------------------------------------------------------
@@ -892,3 +924,52 @@ def test_mesh_bounds_reports_a_mesh_with_no_bounds_instead_of_crashing(monkeypat
     r = meshes.get_mesh_bounds("/Game/M/M.M")
     assert r["success"] is False
     assert "Mystery" in r["error"]
+
+
+# --- create_material must never open a modal -------------------------------
+#
+# AssetTools.create_asset defaults to replace_existing=True, which pops an editor
+# dialog. The dialog blocks the Remote Control endpoint, so the caller sees a
+# timeout rather than a question and cannot answer it.
+
+
+def test_create_material_refuses_to_overwrite_by_default(fake_bridge):
+    fake_bridge.result = {
+        "found": False,
+        "error": "An asset already exists at /Game/M; pass replace_existing=True"
+                 " (and confirm=True) to overwrite",
+        "material_path": "/Game/M",
+    }
+    r = materials.create_material("/Game/Mats", "M")
+    assert r["success"] is False
+
+
+def test_create_material_never_overwrites(fake_bridge):
+    """
+    Creating a material with a name that is taken must fail, not overwrite and
+    not prompt. Use a new name instead; overwriting is a separate act.
+    """
+    assert "replace_existing" not in inspect.signature(materials.create_material).parameters
+    fake_bridge.result = {
+        "found": False,
+        "error": "An asset already exists at /Game/M; create_material does not"
+                 " overwrite, so use a new name",
+        "material_path": "/Game/M",
+    }
+    r = materials.create_material("/Game/Mats", "M")
+    assert r["success"] is False
+    assert "does not overwrite" in r["error"]
+
+
+def test_create_material_passes_the_overwrite_flag_positionally(fake_bridge):
+    """
+    create_asset's 5th positional arg is calling_context (a Name), so the False
+    that suppresses the overwrite dialog is passed 6th. Leaving it 5th raises
+    "Cannot nativize 'bool' as 'Name'", and omitting it entirely pops the dialog.
+    """
+    fake_bridge.result = {"found": True, "error": None, "material_path": "/Game/M"}
+    materials.create_material("/Game/Mats", "M")
+    snippet = fake_bridge.last_expr
+    # UNREAL expands to __import__('unreal'), so match on the tail of the call.
+    assert "MaterialFactoryNew(), 'None', False)" in snippet
+    assert "MaterialFactoryNew())" not in snippet

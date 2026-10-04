@@ -172,7 +172,12 @@ def indent_block(text: str, spaces: int = 0) -> str:
     surfaces inside the editor.
     """
     pad = " " * spaces
-    return "\n".join(pad + line if line.strip() else line for line in text.splitlines())
+    # Append an empty element so the result always ends in a newline. Without
+    # it, a caller splicing the block before another line concatenates that line
+    # onto the last, which produces an IndentationError in the generated source.
+    # Every call site was getting this wrong individually; fix it here once.
+    lines = text.splitlines() + [""]
+    return "\n".join(pad + line if line.strip() else line for line in lines)
 
 
 def guarded(body: str) -> str:

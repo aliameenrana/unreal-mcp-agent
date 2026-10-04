@@ -291,6 +291,19 @@ underlying Material graph itself, which is where most of the actual
 authoring work happens.
 
 - `create_material`, `create_material_instance`, `set_material_scalar_parameter`, `set_material_vector_parameter` — done (MVP).
+
+  **`create_material` never overwrites.** It fails if the name is taken; use a
+  new one. This is not a limitation but a requirement: `AssetTools.create_asset`
+  defaults `replace_existing` to True, which **pops an editor dialog asking
+  whether to overwrite**, and the dialog blocks the Remote Control endpoint
+  until a human clicks it, so the caller sees a timeout rather than a question
+  and cannot answer it. The flag is passed as the 6th positional argument, since
+  the 5th is `calling_context` (a Name) — passing False 5th raises
+  `Cannot nativize 'bool' as 'Name'`.
+
+  `create_material_instance` sets the parent explicitly and then **reads it
+  back**, because it previously reported the parent it was asked for without
+  checking and produced instances whose `parent` was null.
 - `set_material_texture_parameter`, done. Wraps
   `MaterialEditingLibrary.set_material_instance_texture_parameter_value`,
   which takes a `MaterialParameterAssociation` defaulting to `GLOBAL_PARAMETER`.
@@ -305,10 +318,84 @@ authoring work happens.
   `MaterialEditingLibrary.get_all_material_expressions`. That function does not
   exist in this build. The real names are `get_material_expressions` and
   `get_num_material_expressions` (no `all_`).
-- `create_material_expression` — `MaterialEditingLibrary.create_material_expression`, the node-creation primitive (texture samplers, constants, math nodes, parameter nodes — one tool, a `node_type` argument).
-- `connect_material_expressions` / `connect_material_property` — `MaterialEditingLibrary.connect_material_expressions` and `connect_material_property`, wiring node output pins to input pins and to the final material output (base color, roughness, normal, etc.).
-- `layout_material_graph` — `MaterialExpression.material_expression_editor_x/y`, since Epic's own graph editor positions nodes and an agent-built graph that's all stacked at (0,0) is unreadable if a human ever opens it.
-- `set_material_domain_and_shading_model` — `Material.set_editor_property('material_domain', ...)`/`shading_model`, needed before a graph makes sense (surface vs. post-process vs. UI material).
+**Graph authoring is built and live-verified (17 tools, `tools/material_graph.py`).**
+62 live checks build a material from empty to wired and compiling, each write
+read back through a different call. What follows is what the live editor
+actually does, which differs from the docs in six places.
+
+- **Nodes have no identity but their title.** `MaterialExpression` exposes no
+  id, name or guid; its `desc` (the editable node title) is the only handle that
+  survives a recompile. Every tool takes a selector matched in a defined order —
+  `Brightness` by title, `Multiply@120,80` by class and position, `Multiply` by
+  class, `#2` by index — and **reports an error when a selector matches more than
+  one node** instead of picking one. Wiring the wrong node still compiles and
+  renders wrong, which is the worst failure this tool family has.
+- **`get_inputs_for_material_expression` does NOT return pin names.** It returns
+  the *expressions currently wired into* each input, so an unconnected pin
+  stringifies to `'None'` and a connected one to an object repr. Its **length**
+  is the pin count, which is useful; its contents are not names. A Multiply
+  appears to have inputs `['None', 'None']`. **Input pin names are not readable
+  from Python at all**, so node-to-node connections are attempted and then
+  verified by read-back, and `list_material_expressions` reports
+  `{count, wired, names_discoverable: false}` rather than inventing names.
+  Output pin names *are* discoverable via
+  `get_material_expression_output_names` (a Constant's is `''`; a TextureSample's
+  are `RGB`, `R`, `G`, `B`, `A`, `RGBA`), so those are validated before calling.
+- **Each node class holds its parameter default on a different property**, and
+  `r` — the obvious guess — is right only for `MaterialExpressionConstant`.
+  Measured by attempting each property on each class:
+
+  | class | `r` | `default_value` | `parameter_name` | `texture` |
+  |---|---|---|---|---|
+  | `MaterialExpressionConstant` | yes | - | - | - |
+  | `ScalarParameter` | - | yes (float) | yes | - |
+  | `VectorParameter` | - | yes (**LinearColor**) | yes | - |
+  | `StaticSwitchParameter` | - | yes (bool) | yes | - |
+  | `TextureSampleParameter2D` | - | - | yes | yes |
+
+  `MaterialExpressionConstant3Vector` and `Multiply` expose none of these; only
+  `desc`.
+- **A parameter node with an empty `parameter_name` is not a parameter.**
+  Creating a `TextureSampleParameter2D` and leaving the name unset adds nothing
+  to `get_texture_parameter_names()`: the node reads as a parameter in the graph
+  while being invisible to every instance. Both `create_material_expression` and
+  `create_material_parameter` set it, and read the name lists back.
+- **A `VectorParameter`'s `default_value` is a `LinearColor`, not a `Vector`.**
+  A 3-number default has to be widened with alpha or the editor raises
+  `Cannot nativize 'Vector' as 'LinearColor'`.
+- **`set_material_default_static_switch_parameter_value` does not exist.** Only
+  the getter does, so PLAN.md's guess of a base-material switch setter was wrong
+  by the same route as `generate_lods`. The default actually lives on the
+  `MaterialExpressionStaticSwitchParameter` node's own `default_value`, so
+  `set_material_static_switch_parameter` finds the node by name and writes it
+  there, then reads back through the real getter.
+- `connect_material_input` is a **separate call** from
+  `connect_material_expressions`: the destination is a `MaterialProperty`
+  (`MP_BASE_COLOR`, `MP_NORMAL`, ...), not a node pin. There is no overload
+  accepting both.
+- `get_child_instances` returns **`AssetData`, not loaded objects**, so
+  `get_path_name()` does not exist on them; build the path from
+  `AssetData.package_name` plus the object name.
+- **`recompile_material` returns its shader errors rather than raising**, so a
+  material can fail to compile while every tool reports success. Every mutating
+  tool recompiles and returns `recompile_errors`. All of them take
+  `recompile=False` to skip it: compiling a material whose domain or shading
+  model just changed blocks the editor's main thread long enough that the Remote
+  Control endpoint stops answering, so building 20 nodes with the recompile on
+  by default will wedge the editor.
+- `layout_material_graph` wraps `layout_material_expressions`, since an
+  agent-built graph is otherwise all stacked at the origin and unreadable to a
+  human.
+- `set_material_domain_and_shading_model`, done and live-verified.
+  `material_domain` is a plain settable property. **`shading_model` has no
+  setter** and `shading_models` (the UE5 array that replaced it) is not exposed
+  either, but `set_editor_property("shading_model", ...)` works. Read-back is a
+  repr string (`"<MaterialDomain.MD_UI: 5>"`), so the tool compares on the enum
+  *name* and fails if the value did not take. Destructive, because a domain
+  change makes a material stop rendering on every mesh that uses it with no
+  editor warning, and because saving recompiles the shader — that call needs a
+  longer bridge timeout than the 8s default.
+- `create_material_function` — reusable node subgraphs, `MaterialFunctionFactoryNew`, for anything built more than once. NOT built; `create_material_expression_in_function` and the `_in_function` variants of the delete/layout calls exist, but material functions are a separate authoring surface.
 - `create_material_function` — reusable node subgraphs, `MaterialFunctionFactoryNew`, for anything built more than once.
 
 **Texture creation and editing — yes, this is possible, with caveats:**
@@ -409,6 +496,10 @@ particle logic from scratch.
   corrupts the install rather than the project. Plugin content is refused for
   the same reason. The prefix check includes the trailing slash, because
   `/Gameplay` passes a `startswith("/Game")` test and is not a content path.
+- `save_asset`, done. Worth having for a non-obvious reason: setting a material
+  instance's parent changes it in memory, and although `get_child_instances`
+  does surface an unsaved instance, the parent link is not what registers it.
+  Save before relying on reverse lookups across sessions.
 - `import_texture`, done and live-verified against a synthesized PNG. **`srgb`
   and `compression_settings` are not on `TextureFactory`** (it exposes neither,
   and setting them raises `AttributeError`); they are properties of the

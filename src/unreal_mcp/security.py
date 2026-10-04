@@ -124,7 +124,17 @@ def check_destination_path(destination_path: str, valid_prefixes=("/Game/",)) ->
     Note the prefix has to include the trailing slash. "/Gameplay" passes a
     startswith("/Game") check but is not a content path at all.
     """
-    if not destination_path.startswith(valid_prefixes):
+    # "/Game" is the content root, so it is a valid destination; only a path
+    # *under* a valid prefix has to start with one including the trailing slash.
+    # The bare content root is valid ("/Game"), but a prefix without its
+    # trailing slash would wrongly accept "/Gameplay". Compare the path
+    # component-wise rather than with startswith.
+    roots = tuple(prefix.rstrip("/") for prefix in valid_prefixes)
+    ok = any(
+        destination_path == root or destination_path.startswith(root + "/")
+        for root in roots
+    )
+    if not ok:
         raise SecurityViolation(
             f"Destination '{destination_path}' must be under "
             f"{' or '.join(valid_prefixes)}."
@@ -223,7 +233,25 @@ TOOL_RISK_TIERS: dict[str, RiskTier] = {
     "set_property": RiskTier.CONSTRUCTIVE,
     "get_property": RiskTier.READ_ONLY,
     "asset_exists": RiskTier.READ_ONLY,
+    "save_asset": RiskTier.CONSTRUCTIVE,
     "get_material_parameter_list": RiskTier.READ_ONLY,
+    "list_material_expressions": RiskTier.READ_ONLY,
+    "get_material_inputs": RiskTier.READ_ONLY,
+    "get_material_graph_stats": RiskTier.READ_ONLY,
+    "get_material_used_textures": RiskTier.READ_ONLY,
+    "find_material_parameter_usage": RiskTier.READ_ONLY,
+    "get_material_expression_property": RiskTier.READ_ONLY,
+    "recompile_material_graph": RiskTier.READ_ONLY,
+    "create_material_expression": RiskTier.CONSTRUCTIVE,
+    "create_material_parameter": RiskTier.CONSTRUCTIVE,
+    "connect_material_expressions": RiskTier.CONSTRUCTIVE,
+    "connect_material_input": RiskTier.CONSTRUCTIVE,
+    "disconnect_material_input": RiskTier.DESTRUCTIVE,
+    "set_material_expression_property": RiskTier.CONSTRUCTIVE,
+    "layout_material_graph": RiskTier.CONSTRUCTIVE,
+    "delete_material_expression": RiskTier.DESTRUCTIVE,
+    "delete_unused_material_expressions": RiskTier.DESTRUCTIVE,
+    "set_material_static_switch_parameter": RiskTier.DESTRUCTIVE,
     "set_material_texture_parameter": RiskTier.CONSTRUCTIVE,
     "add_component": RiskTier.CONSTRUCTIVE,
     "remove_component": RiskTier.DESTRUCTIVE,

@@ -22,35 +22,107 @@ from ..remote_snippets import (
 
 
 def create_material(asset_path: str, asset_name: str) -> dict:
-    """Creates a new, blank base Material asset at <asset_path>/<asset_name>."""
+    """
+    Creates a new, blank base Material asset at <asset_path>/<asset_name>.
+
+    Fails if anything already occupies that name, and never overwrites. Pick a
+    fresh name instead: overwriting a material is a separate, deliberate act with
+    its own consequences, not something a create call should do implicitly.
+
+    The overwrite flag is passed as False explicitly rather than left to the
+    default because `AssetTools.create_asset` defaults it to True, which pops an
+    editor dialog asking whether to overwrite. **An automated tool must never
+    open a modal:** the dialog blocks the Remote Control endpoint until a human
+    clicks it, so the caller sees a timeout rather than a question and cannot
+    answer it.
+
+    The 5th positional argument is calling_context (a Name), so the False has to
+    be passed 6th and named; passing it 5th raises "Cannot nativize 'bool' as
+    'Name'".
+    """
     security.enforce_tier("create_material")
+    security.check_destination_path(asset_path)
+
     full_path = f"{asset_path}/{asset_name}"
-    expr = json_dumps(
-        seq(
-            f"{asset_tools()}.create_asset({asset_name!r}, {asset_path!r}, "
-            f"{UNREAL}.Material, {UNREAL}.MaterialFactoryNew())",
-            repr(full_path),
-        )
+    body = (
+        f"full = {full_path!r}\n"
+        f"if {UNREAL}.EditorAssetLibrary.does_asset_exist(full):\n"
+        f"    OUT = {{'found': False,\n"
+        f"          'error': 'An asset already exists at ' + full\n"
+        f"                 + '; create_material does not overwrite, so use a new name',\n"
+        f"          'material_path': full}}\n"
+        f"else:\n"
+        f"    a = {asset_tools()}.create_asset(\n"
+        f"        {asset_name!r}, {asset_path!r}, {UNREAL}.Material,\n"
+        f"        {UNREAL}.MaterialFactoryNew(), 'None', False)\n"
+        f"    OUT = {{'found': a is not None,\n"
+        f"          'error': None if a is not None else 'create_asset returned None',\n"
+        f"          'material_path': full if a is not None else None}}\n"
     )
-    result = get_bridge().run_python(expr)
-    return {"success": True, "material_path": result}
+    payload = get_bridge().run_python(guarded(body), timeout=120.0)
+    if not payload.get("found"):
+        return {"success": False, "material_path": payload.get("material_path"),
+                "error": payload.get("error")}
+    return {"success": True, "material_path": payload["material_path"]}
 
 
-def create_material_instance(asset_path: str, asset_name: str, parent_material_path: str) -> dict:
-    """Creates a Material Instance Constant parented to an existing Material."""
+def create_material_instance(
+    asset_path: str,
+    asset_name: str,
+    parent_material_path: str,
+) -> dict:
+    """
+    Creates a Material Instance Constant parented to an existing Material.
+
+    The parent is set explicitly after creation rather than trusted from the
+    factory, and the result is read back from the instance. Both matter: this
+    previously reported the parent it was *asked* for without checking, and
+    produced instances whose `parent` was null, which is why
+    find_material_parameter_usage found no children.
+
+    Also drops the `(lambda x: ...)[-1]` subscripting that
+    TOOL_BUILDING_GUIDE.md records as silently returning nothing, and passes
+    overwrite_existing=False so no overwrite dialog can appear.
+    """
     security.enforce_tier("create_material_instance")
+    security.check_destination_path(asset_path)
+
     full_path = f"{asset_path}/{asset_name}"
-    expr = json_dumps(
-        seq(
-            f"(lambda inst: ({UNREAL}.MaterialEditingLibrary.set_material_instance_parent("
-            f"inst, {load_asset(parent_material_path)}), inst)[-1])"
-            f"({asset_tools()}.create_asset({asset_name!r}, {asset_path!r}, "
-            f"{UNREAL}.MaterialInstanceConstant, {UNREAL}.MaterialInstanceConstantFactoryNew()))",
-            repr(full_path),
-        )
+    body = (
+        f"full = {full_path!r}\n"
+        f"parent = {load_asset(parent_material_path)}\n"
+        f"if parent is None:\n"
+        f"    OUT = {{'found': False, 'error': 'Could not load parent '\n"
+        f"          + {parent_material_path!r},\n"
+        f"          'instance_path': None, 'parent': None}}\n"
+        f"elif {UNREAL}.EditorAssetLibrary.does_asset_exist(full):\n"
+        f"    OUT = {{'found': False, 'error': 'An asset already exists at ' + full\n"
+        f"          + '; create_material_instance does not overwrite, so use a new name',\n"
+        f"          'instance_path': full, 'parent': None}}\n"
+        f"else:\n"
+        f"    inst = {asset_tools()}.create_asset(\n"
+        f"        {asset_name!r}, {asset_path!r}, {UNREAL}.MaterialInstanceConstant,\n"
+        f"        {UNREAL}.MaterialInstanceConstantFactoryNew(), 'None', False)\n"
+        f"    if inst is None:\n"
+        f"        OUT = {{'found': False, 'error': 'create_asset returned None',\n"
+        f"              'instance_path': None, 'parent': None}}\n"
+        f"    else:\n"
+        f"        {UNREAL}.MaterialEditingLibrary.set_material_instance_parent(\n"
+        f"            inst, parent)\n"
+        f"        # Read the parent back rather than reporting the one requested.\n"
+        f"        actual = inst.get_editor_property('parent')\n"
+        f"        OUT = {{'found': actual is not None,\n"
+        f"              'error': None if actual is not None else\n"
+        f"                     'the instance was created but its parent did not stick',\n"
+        f"              'instance_path': full,\n"
+        f"              'parent': actual.get_path_name() if actual else None}}\n"
     )
-    result = get_bridge().run_python(expr)
-    return {"success": True, "instance_path": result, "parent": parent_material_path}
+    payload = get_bridge().run_python(guarded(body), timeout=120.0)
+    if not payload.get("found"):
+        return {"success": False, "instance_path": payload.get("instance_path"),
+                "error": payload.get("error")}
+    return {"success": True, "instance_path": payload["instance_path"],
+            "parent": payload.get("parent")}
 
 
 def set_material_scalar_parameter(instance_path: str, param_name: str, value: float) -> dict:

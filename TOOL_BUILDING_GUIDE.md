@@ -685,7 +685,20 @@ replacement for reading the docs on the next one.
    spatial query are all selection predicates that can match something you did
    not make. Verify the level is unchanged by comparing against a snapshot
    taken *before* the run, not against a count.
-8. **`CommandResult` from `ExecutePythonCommandEx` arrives repr-wrapped.**
+8. **A tool must never open a modal dialog.** `AssetTools.create_asset`
+   defaults `replace_existing` to True, which pops an editor dialog asking
+   whether to overwrite. The dialog blocks the Remote Control endpoint until a
+   human clicks it, so the client sees a timeout rather than a question and
+   cannot answer it — the run looks like a hang, not a prompt. Pass
+   `replace_existing=False` explicitly and fail on a taken name, or use a fresh
+   name. Note the flag is the **6th** positional argument; the 5th is
+   `calling_context` (a Name), and passing a bool there raises
+   `Cannot nativize 'bool' as 'Name'`.
+9. **Recheck a value rather than echoing back what you were asked for.**
+   `create_material_instance` reported the parent it was given without reading
+   it back, and happily produced instances whose `parent` was null. Every write
+   should be confirmed through a different call than the one that made it.
+10. **`CommandResult` from `ExecutePythonCommandEx` arrives repr-wrapped.**
    Unreal `repr()`s the Python return value before putting it on the wire,
    so a string result comes back double-encoded. `bridge.py`'s
    `run_python()` already handles this (`ast.literal_eval` unwrap before
@@ -694,6 +707,22 @@ replacement for reading the docs on the next one.
    "repr-then-serialize" quirk may resurface in some other form if you ever
    touch the transport layer or build a tool that bypasses `run_python()`
    for some reason.
+11. **Splicing a multi-line snippet into an indented block.** A helper that
+   emits at column 0 must land at the same depth as the statement it is spliced
+   beside, or it produces an `IndentationError` that only surfaces inside
+   `exec()` on the editor side, as a failure with an empty log and no clue.
+   `indent_block()` handles this and **always appends a trailing newline**,
+   because a block spliced before another line concatenates that line onto the
+   last. Three separate helpers here (`indent_block`, `_compile_errors`,
+   `_recompiled_result`) take an explicit indent for exactly this reason: the
+   fix belongs in the helper, not in every call site.
+12. **One f-string often emits the whole snippet, so its braces are format
+   syntax.** A `{n}` placeholder meant for the *generated* code is evaluated
+   while the snippet is being built, raising `NameError` before anything is
+   sent. Comments inside the emitted text count too — a brace in a comment
+   breaks the build the same way. Likewise a name computed on the caller's side
+   has no binding on the editor's: interpolate it as `{label!r}`, never
+   reference a bare `label`.
 
 ---
 

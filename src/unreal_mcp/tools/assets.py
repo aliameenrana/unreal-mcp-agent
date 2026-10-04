@@ -55,3 +55,33 @@ def delete_asset(asset_path: str, confirm: bool = False) -> dict:
         "deleted": payload.get("deleted"),
         "still_exists": payload.get("still_exists"),
     }
+
+def save_asset(asset_path: str) -> dict:
+    """
+    Saves an asset to disk so the asset registry knows about it.
+
+    Not obvious, and it matters for reverse lookups: setting a material
+    instance's parent only changes it in memory, and
+    `MaterialEditingLibrary.get_child_instances` walks the *registry*. A freshly
+    created, unsaved instance therefore has a parent but is not reported as a
+    child of anything. Save before asking who depends on what.
+
+    Returns the object's short package name, which is not a useful identifier,
+    so this reports success rather than pretending to return a path.
+    """
+    security.enforce_tier("save_asset")
+    security.check_destination_path(asset_path)
+
+    body = (
+        f"a = {UNREAL}.load_asset({asset_path!r})\n"
+        f"if a is None:\n"
+        f"    OUT = {{'found': False, 'error': 'Could not load ' + {asset_path!r},"
+        f" 'saved': False}}\n"
+        f"else:\n"
+        f"    ok = {UNREAL}.EditorAssetLibrary.save_asset({asset_path!r}, only_if_is_dirty=True)\n"
+        f"    OUT = {{'found': True, 'error': None, 'saved': bool(ok)}}\n"
+    )
+    payload = get_bridge().run_python(guarded(body), timeout=120.0)
+    if not payload.get("found"):
+        return {"success": False, "asset_path": asset_path, "error": payload.get("error")}
+    return {"success": bool(payload.get("saved")), "asset_path": asset_path}
