@@ -41,7 +41,13 @@ from __future__ import annotations
 
 from .. import security
 from ..bridge import get_bridge
-from ..remote_snippets import UNREAL, guarded, indent_block, load_asset
+from ..remote_snippets import (
+    UNREAL,
+    asset_tools,
+    guarded,
+    indent_block,
+    load_asset,
+)
 
 # Material inputs worth offering by name. MaterialProperty in 5.8 has no
 # roughness-from-metallic or clear-coat member: those are shading models, not
@@ -1391,4 +1397,612 @@ def set_material_static_switch_parameter(
         "switches": payload.get("switches"),
         "recompile_errors": payload.get("recompile_errors"),
         "compiled_clean": payload.get("compiled_clean"),
+    }
+
+# ---------------------------------------------------------------------------
+# Material functions
+#
+# A MaterialFunction is a reusable subgraph, and its API is a parallel set of
+# methods rather than the same ones with a different argument: there is
+# create_material_expression_in_function but no connect_material_expressions_in_
+# function, so **node-to-node wiring inside a function reuses the plain
+# connect_material_expressions**. Deletion and layout do have _in_function
+# variants.
+#
+# Three things here are not obvious:
+#
+# - **A MaterialFunction has no readable `expressions` property.** The base
+#   Material does, but on a function it raises. Nodes are read with
+#   `get_material_function_expressions`, and counted with
+#   `get_num_material_expressions_in_function`.
+# - **`get_material_expressions` refuses a MaterialFunction outright**
+#   ("Failed to convert parameter 'material'"), so passing one to the material
+#   tools is an error rather than an empty list.
+# - **The pin names of a FunctionInput/FunctionOutput are properties, not
+#   arguments**: `input_name` / `input_type` and `output_name`. A function with no
+#   FunctionInput and no FunctionOutput has no way to be called or to return
+#   anything, so create_material_function makes one of each by default.
+# ---------------------------------------------------------------------------
+
+# The type enums for the two ends of a function are **different enums with
+# different member names**, which no documentation mentions:
+#
+#   FunctionInputType  (ByteProperty) on MaterialExpressionFunctionInput.input_type
+#   CustomMaterialOutputType          on MaterialExpressionFunctionOutput.output_type
+#
+# Passing the wrong one raises "Cannot nativize 'CustomMaterialOutputType' as
+# 'FunctionInputType'". The input enum is spelled FUNCTION_INPUT_*, not the
+# CMOT_* names expected from the C++ side.
+FUNCTION_INPUT_TYPES = {
+    "scalar": "FUNCTION_INPUT_SCALAR",
+    "vector2": "FUNCTION_INPUT_VECTOR2",
+    "vector3": "FUNCTION_INPUT_VECTOR3",
+    "vector4": "FUNCTION_INPUT_VECTOR4",
+    "bool": "FUNCTION_INPUT_BOOL",
+    "static_bool": "FUNCTION_INPUT_STATIC_BOOL",
+    "texture2d": "FUNCTION_INPUT_TEXTURE2D",
+    "texture2d_array": "FUNCTION_INPUT_TEXTURE2D_ARRAY",
+    "texture_cube": "FUNCTION_INPUT_TEXTURE_CUBE",
+    "texture_external": "FUNCTION_INPUT_TEXTURE_EXTERNAL",
+    "volume_texture": "FUNCTION_INPUT_VOLUME_TEXTURE",
+    "material_attributes": "FUNCTION_INPUT_MATERIAL_ATTRIBUTES",
+    "substrate": "FUNCTION_INPUT_SUBSTRATE",
+}
+
+FUNCTION_OUTPUT_TYPES = {
+    "scalar": "CMOT_FLOAT1",
+    "vector2": "CMOT_FLOAT2",
+    "vector3": "CMOT_FLOAT3",
+    "vector4": "CMOT_FLOAT4",
+    "material_attributes": "CMOT_MATERIAL_ATTRIBUTES",
+}
+
+
+def create_material_function(
+    asset_path: str,
+    function_name: str,
+    description: str = "",
+    input_name: str = "Input",
+    input_type: str = "vector3",
+    output_name: str = "Output",
+) -> dict:
+    """
+    Creates a MaterialFunction asset with one FunctionInput and one FunctionOutput
+    already in place.
+
+    The two are not optional. A function with no FunctionInput cannot be called
+    with a value, and one with no FunctionOutput cannot return anything, so
+    creating a bare function leaves something that looks like a function and
+    cannot be used as one. Both are created with their names and types set.
+
+    Fails rather than overwriting an existing asset, and never prompts: see
+    create_material for why an overwrite dialog is unacceptable in a tool.
+
+    input_type is a friendly name resolved through FUNCTION_INPUT_TYPES, e.g.
+    "scalar", "vector3", "texture2d". It maps to a `FunctionInputType` member
+    (FUNCTION_INPUT_*), **not** the CMOT_* spelling used by
+    `CustomMaterialOutputType`; passing the wrong enum raises "Cannot nativize
+    'CustomMaterialOutputType' as 'FunctionInputType'".
+
+    **There is no output_type argument**, because a FunctionOutput exposes no
+    output type property at all: only `output_name` is settable, and
+    `CustomMaterialOutputType` exists as an enum but is not reachable from the
+    node. The return type follows from what is wired into the output pin.
+    """
+    security.enforce_tier("create_material_function")
+    security.check_destination_path(asset_path)
+
+    in_enum = FUNCTION_INPUT_TYPES.get(input_type)
+    if in_enum is None:
+        return {
+            "success": False,
+            "error": f"Unknown input_type {input_type!r}. Choose one of "
+                     f"{', '.join(sorted(FUNCTION_INPUT_TYPES))}.",
+        }
+    full_path = f"{asset_path}/{function_name}"
+    body = (
+        f"full = {full_path!r}\n"
+        f"if {UNREAL}.EditorAssetLibrary.does_asset_exist(full):\n"
+        f"    OUT = {{'found': False, 'material_path': None, 'function_path': full,\n"
+        f"          'error': ('An asset already exists at ' + full + '; create_'\n"
+        f"                   + 'material_function does not overwrite, so use a'\n"
+        f"                   + ' new name'),\n"
+        f"          'function_path': None}}\n"
+        f"else:\n"
+        f"    mf = {asset_tools()}.create_asset(\n"
+        f"        {function_name!r}, {asset_path!r}, {UNREAL}.MaterialFunction,\n"
+        f"        {UNREAL}.MaterialFunctionFactoryNew(), 'None', False)\n"
+        f"    if mf is None:\n"
+        f"        OUT = {{'found': False, 'material_path': None, 'function_path': full,\n"
+        f"              'error': 'create_asset returned None'}}\n"
+        f"    else:\n"
+        f"        mel = {UNREAL}.MaterialEditingLibrary\n"
+        f"        mf.set_editor_property('description', {description!r})\n"
+        f"        fi = mel.create_material_expression_in_function(\n"
+        f"            mf, {UNREAL}.MaterialExpressionFunctionInput, -300, 0)\n"
+        f"        fo = mel.create_material_expression_in_function(\n"
+        f"            mf, {UNREAL}.MaterialExpressionFunctionOutput, 300, 0)\n"
+        f"        fi.set_editor_property('input_name', {UNREAL}.Name({input_name!r}))\n"
+        f"        fi.set_editor_property(\n"
+        f"            'input_type',\n"
+        f"            {UNREAL}.FunctionInputType.{in_enum})\n"
+        f"        fo.set_editor_property('output_name', {UNREAL}.Name({output_name!r}))\n"
+        f"        OUT = {{'found': True, 'error': None, 'function_path': full,\n"
+        f"              'input_name': str(fi.get_editor_property('input_name')),\n"
+        f"              'output_name': str(fo.get_editor_property('output_name')),\n"
+        f"              'expression_count':\n"
+        f"                  mel.get_num_material_expressions_in_function(mf)}}\n"
+    )
+    payload = get_bridge().run_python(guarded(body), timeout=120.0)
+    if not payload.get("found"):
+        return {"success": False, "function_path": payload.get("function_path"),
+                "error": payload.get("error")}
+    return {
+        "success": True,
+        "function_path": payload["function_path"],
+        "input_name": payload.get("input_name"),
+        "output_name": payload.get("output_name"),
+        "expression_count": payload.get("expression_count"),
+    }
+
+
+def list_material_function_expressions(function_path: str) -> dict:
+    """
+    Lists a MaterialFunction's nodes with class, title, position and pins.
+
+    Uses `get_material_function_expressions`: a MaterialFunction has **no
+    readable `expressions` property**, and `get_material_expressions` rejects a
+    function outright rather than returning an empty list.
+    """
+    security.enforce_tier("list_material_function_expressions")
+    security.check_destination_path(function_path)
+
+    body = (
+        f"mf = {load_asset(function_path)}\n"
+        f"if mf is None:\n"
+        f"    OUT = {{'found': False, 'error': 'Could not load ' + {function_path!r},"
+        f" 'count': None, 'nodes': []}}\n"
+        f"else:\n"
+        f"    mel = {UNREAL}.MaterialEditingLibrary\n"
+        f"    rows = []\n"
+        f"    for _e in mel.get_material_function_expressions(mf):\n"
+        f"        _cls = _e.get_class().get_name()\n"
+        f"        _d = str(_e.get_editor_property('desc') or '')\n"
+        f"        try:\n"
+        f"            _x, _y = mel.get_material_expression_node_position(_e)\n"
+        f"        except Exception:\n"
+        f"            _x, _y = 0, 0\n"
+        f"        try:\n"
+        f"            _outs = [str(o) for o in mel.get_material_expression_output_names(_e)]\n"
+        f"        except Exception:\n"
+        f"            _outs = []\n"
+        f"        _label = (_d + ' ' if _d else '') + _cls + '@' + str(_x) + ',' + str(_y)\n"
+        f"        _row = {{'class': _cls, 'desc': _d, 'x': _x, 'y': _y,\n"
+        f"                'outputs': _outs, 'selector': _label}}\n"
+        f"        if _cls == 'MaterialExpressionFunctionInput':\n"
+        f"            _row['input_name'] = str(_e.get_editor_property('input_name'))\n"
+        f"            _row['input_type'] = str(_e.get_editor_property('input_type'))\n"
+        f"        if _cls == 'MaterialExpressionFunctionOutput':\n"
+        f"            _row['output_name'] = str(_e.get_editor_property('output_name'))\n"
+        f"        rows.append(_row)\n"
+        f"    OUT = {{'found': True, 'error': None, 'count': len(rows), 'nodes': rows}}\n"
+    )
+    payload = get_bridge().run_python(guarded(body))
+    return {
+        "success": bool(payload.get("found")),
+        "function_path": function_path,
+        "error": payload.get("error"),
+        "count": payload.get("count"),
+        "nodes": payload.get("nodes") or [],
+    }
+
+
+def create_material_function_expression(
+    function_path: str,
+    expression_class: str,
+    node_x: int = 0,
+    node_y: int = 0,
+    description: str = "",
+    properties: dict[str, object] | None = None,
+    parameter_name: str = "",
+    group: str = "",
+    recompile: bool = False,
+) -> dict:
+    """
+    Adds a node to a MaterialFunction, by way of
+    `create_material_expression_in_function`.
+
+    There is no separate connect/delete/layout family for functions beyond
+    `_in_function` variants of delete and layout; wiring a node inside a
+    function uses the ordinary `connect_material_expressions`.
+
+    recompile defaults to False here, unlike the material tools, because a
+    material function compiles only when a material that calls it does.
+    """
+    security.enforce_tier("create_material_function_expression")
+    security.check_destination_path(function_path)
+
+    if not expression_class.startswith("MaterialExpression"):
+        return {
+            "success": False,
+            "error": f"expression_class must be a MaterialExpression class name, got "
+                     f"{expression_class!r}.",
+        }
+
+    config_lines = []
+    if description:
+        config_lines.append(f"    _expr.set_editor_property('desc', {description!r})")
+    if parameter_name:
+        config_lines.append(
+            f"    _expr.set_editor_property('parameter_name', "
+            f"{UNREAL}.Name({parameter_name!r}))"
+        )
+    if group:
+        config_lines.append(
+            f"    _expr.set_editor_property('group', {UNREAL}.Name({group!r}))"
+        )
+    for key, value in (properties or {}).items():
+        config_lines.append(
+            f"    _expr.set_editor_property({key!r}, {value!r})"
+        )
+    config = indent_block("\n".join(config_lines + [""]), 4)
+
+    body = (
+        f"mf = {load_asset(function_path)}\n"
+        f"if mf is None:\n"
+        f"    OUT = {{'found': False, 'error': 'Could not load ' + {function_path!r},"
+        f" 'selector': None}}\n"
+        f"else:\n"
+        f"    mel = {UNREAL}.MaterialEditingLibrary\n"
+        f"    _cls = getattr({UNREAL}, {expression_class!r}, None)\n"
+        f"    if _cls is None:\n"
+        f"        OUT = {{'found': False, 'selector': None,\n"
+        f"              'error': 'No such expression class: ' + {expression_class!r}}}\n"
+        f"    else:\n"
+        f"        _expr = mel.create_material_expression_in_function(\n"
+        f"            mf, _cls, {int(node_x)}, {int(node_y)})\n"
+        + config +
+        f"        _x, _y = mel.get_material_expression_node_position(_expr)\n"
+        f"        _d = str(_expr.get_editor_property('desc') or '')\n"
+        f"        _sel = ((_d + ' ') if _d else '') + _expr.get_class().get_name()\n"
+        f"        _sel = _sel + '@' + str(_x) + ',' + str(_y)\n"
+        f"        OUT = {{'found': True, 'error': None, 'selector': _sel,\n"
+        f"              'class': _expr.get_class().get_name(), 'desc': _d,\n"
+        f"              'x': _x, 'y': _y,\n"
+        f"              'expression_count':\n"
+        f"                  mel.get_num_material_expressions_in_function(mf)}}\n"
+    )
+    payload = get_bridge().run_python(guarded(body))
+    if not payload.get("found"):
+        return {"success": False, "function_path": function_path, "error": payload.get("error")}
+    return {
+        "success": True,
+        "function_path": function_path,
+        "selector": payload.get("selector"),
+        "expression_class": payload.get("class"),
+        "description": payload.get("desc"),
+        "position": [payload.get("x"), payload.get("y")],
+        "expression_count": payload.get("expression_count"),
+    }
+
+
+def delete_material_function_expression(
+    function_path: str,
+    expression: str,
+    confirm: bool = False,
+) -> dict:
+    """
+    Removes one node from a MaterialFunction, by way of
+    `delete_material_expression_in_function`.
+
+    Destructive, requires confirm=True, and refuses an ambiguous selector.
+    """
+    security.enforce_tier("delete_material_function_expression", confirm=confirm)
+    security.check_destination_path(function_path)
+
+    body = (
+        f"mf = {load_asset(function_path)}\n"
+        f"if mf is None:\n"
+        f"    OUT = {{'found': False, 'error': 'Could not load ' + {function_path!r},"
+        f" 'deleted': False}}\n"
+        f"else:\n"
+        f"    mel = {UNREAL}.MaterialEditingLibrary\n"
+        + indent_block(_function_resolve_snippet(expression), 4) +
+        f"    _before = mel.get_num_material_expressions_in_function(mf)\n"
+        f"    _removed = None\n"
+        f"    if _target is not None:\n"
+        f"        _removed = (str(_target.get_editor_property('desc') or '')\n"
+        f"                    or _target.get_class().get_name())\n"
+        f"        mel.delete_material_expression_in_function(mf, _target)\n"
+        f"    _after = mel.get_num_material_expressions_in_function(mf)\n"
+        f"    OUT = {{'found': _err is None, 'error': _err,\n"
+        f"          'deleted': _target is not None, 'removed': _removed,\n"
+        f"          'expression_count_before': _before,\n"
+        f"          'expression_count_after': _after}}\n"
+    )
+    payload = get_bridge().run_python(guarded(body))
+    if payload.get("error") and not payload.get("deleted"):
+        return {"success": False, "function_path": function_path, "error": payload.get("error")}
+    return {
+        "success": bool(payload.get("deleted")),
+        "function_path": function_path,
+        "expression": expression,
+        "removed": payload.get("removed"),
+        "expression_count_before": payload.get("expression_count_before"),
+        "expression_count_after": payload.get("expression_count_after"),
+    }
+
+
+def layout_material_function(function_path: str) -> dict:
+    """
+    Auto-arranges a MaterialFunction's nodes, via
+    `layout_material_function_expressions`.
+    """
+    security.enforce_tier("layout_material_function")
+    security.check_destination_path(function_path)
+
+    body = (
+        f"mf = {load_asset(function_path)}\n"
+        f"if mf is None:\n"
+        f"    OUT = {{'found': False, 'error': 'Could not load ' + {function_path!r},"
+        f" 'count': None}}\n"
+        f"else:\n"
+        f"    mel = {UNREAL}.MaterialEditingLibrary\n"
+        f"    mel.layout_material_function_expressions(mf)\n"
+        f"    rows = []\n"
+        f"    for _e in mel.get_material_function_expressions(mf):\n"
+        f"        _x, _y = mel.get_material_expression_node_position(_e)\n"
+        f"        rows.append([_x, _y])\n"
+        f"    OUT = {{'found': True, 'error': None, 'count': len(rows),\n"
+        f"          'positions': rows}}\n"
+    )
+    payload = get_bridge().run_python(guarded(body))
+    return {
+        "success": bool(payload.get("found")),
+        "function_path": function_path,
+        "error": payload.get("error"),
+        "count": payload.get("count"),
+        "positions": payload.get("positions"),
+    }
+
+
+def delete_all_material_function_expressions(
+    function_path: str,
+    confirm: bool = False,
+) -> dict:
+    """
+    Removes every node from a MaterialFunction, including its FunctionInput and
+    FunctionOutput, which leaves a function that cannot be called or return
+    anything. Destructive; requires confirm=True.
+    """
+    security.enforce_tier("delete_all_material_function_expressions", confirm=confirm)
+    security.check_destination_path(function_path)
+
+    body = (
+        f"mf = {load_asset(function_path)}\n"
+        f"if mf is None:\n"
+        f"    OUT = {{'found': False, 'error': 'Could not load ' + {function_path!r},"
+        f" 'removed': None}}\n"
+        f"else:\n"
+        f"    mel = {UNREAL}.MaterialEditingLibrary\n"
+        f"    _before = mel.get_num_material_expressions_in_function(mf)\n"
+        f"    mel.delete_all_material_expressions_in_function(mf)\n"
+        f"    _after = mel.get_num_material_expressions_in_function(mf)\n"
+        f"    OUT = {{'found': True, 'error': None,\n"
+        f"          'expression_count_before': _before,\n"
+        f"          'expression_count_after': _after,\n"
+        f"          'removed': _before - _after}}\n"
+    )
+    payload = get_bridge().run_python(guarded(body))
+    if not payload.get("found"):
+        return {"success": False, "function_path": function_path, "error": payload.get("error")}
+    return {
+        "success": True,
+        "function_path": function_path,
+        "removed": payload.get("removed"),
+        "expression_count_before": payload.get("expression_count_before"),
+        "expression_count_after": payload.get("expression_count_after"),
+    }
+
+
+def _function_resolve_snippet(selector: str) -> str:
+    """
+    Node resolution for a MaterialFunction. Identical to _resolve_snippet except
+    it reads `get_material_function_expressions`, since
+    `get_material_expressions` rejects a function outright.
+    """
+    predicate, label = _selector_predicate(selector)
+    return f'''
+def _describe(e):
+    d = str(e.get_editor_property("desc") or "")
+    cls = e.get_class().get_name()
+    try:
+        pos = list(mel.get_material_expression_node_position(e))
+    except Exception:
+        pos = [0, 0]
+    return (d + " " if d else "") + cls + "@" + str(pos[0]) + "," + str(pos[1])
+
+
+def _resolve():
+    nodes = list(mel.get_material_function_expressions(mf))
+    hits = [e for e in nodes if {predicate}]
+    if len(hits) == 1:
+        return hits[0], None
+    if not hits:
+        return None, ("no node matching " + {label!r} + "; the function has "
+                      + str(len(nodes)) + " expression(s): "
+                      + ", ".join(_describe(e) for e in nodes[:12]))
+    return None, ({label!r} + " matches " + str(len(hits)) + " nodes ("
+                  + ", ".join(_describe(e) for e in hits[:8])
+                  + "); disambiguate with a description, Class@x,y, or #index")
+
+
+_target, _err = _resolve()
+
+'''
+
+
+def connect_material_function_expressions(
+    function_path: str,
+    from_expression: str,
+    from_output: str,
+    to_expression: str,
+    to_input: str,
+) -> dict:
+    """
+    Wires one node's output into another's input **inside a MaterialFunction**.
+
+    This exists because the plain `connect_material_expressions` cannot be used
+    for a function: it resolves nodes with `get_material_expressions`, which
+    rejects a MaterialFunction outright ("Cannot nativize 'MaterialFunction' as
+    'Material', allowed Class type: 'Material'"). There is no
+    `connect_material_expressions_in_function` in 5.8, so this is the only route
+    to wiring a function's nodes.
+
+    Everything else matches the material version, including the read-back that
+    confirms the source expression really is present in the target's inputs
+    afterwards. Input pin names are not readable from Python, so they are not
+    pre-validated; see connect_material_expressions.
+    """
+    security.enforce_tier("connect_material_function_expressions")
+    security.check_destination_path(function_path)
+
+    body = (
+        f"mf = {load_asset(function_path)}\n"
+        f"if mf is None:\n"
+        f"    OUT = {{'found': False, 'error': 'Could not load ' + {function_path!r},"
+        f" 'connected': False}}\n"
+        f"else:\n"
+        f"    mel = {UNREAL}.MaterialEditingLibrary\n"
+        f"    _from = None\n"
+        f"    _to = None\n"
+        f"    _errs = []\n"
+        + indent_block(_function_resolve_snippet(from_expression), 4) +
+        f"    _from = _target\n"
+        f"    _from_err = _err\n"
+        + indent_block(_function_resolve_snippet(to_expression), 4) +
+        f"    _to = _target\n"
+        f"    _to_err = _err\n"
+        f"    _connected = False\n"
+        f"    if _from is None:\n"
+        f"        _errs.append('from: ' + str(_from_err))\n"
+        f"    if _to is None:\n"
+        f"        _errs.append('to: ' + str(_to_err))\n"
+        f"    if _from is not None and _to is not None:\n"
+        f"        _outs = [str(o) for o in mel.get_material_expression_output_names(_from)]\n"
+        f"        if _outs and {from_output!r} not in _outs:\n"
+        f"            _errs.append('no output pin ' + {from_output!r} + ' on '\n"
+        f"                         + {from_expression!r} + '; available: ' + repr(_outs))\n"
+        f"        _count = len(list(mel.get_material_function_expressions(mf)))\n"
+        f"        if not _errs:\n"
+        f"            _connected = bool(mel.connect_material_expressions(\n"
+        f"                _from, {from_output!r}, _to, {to_input!r}))\n"
+        f"            if not _connected:\n"
+        f"                _errs.append('connect returned False for input pin '\n"
+        f"                             + {to_input!r} + '; the function has '\n"
+        f"                             + str(_count) + ' node(s)')\n"
+        f"            else:\n"
+        f"                _in = mel.get_inputs_for_material_function_expression(mf, _to)\n"
+        f"                if not any(i == _from for i in _in):\n"
+        f"                    _errs.append('connect returned True but the source is not'\n"
+        f"                                 + ' present in the target inputs afterwards')\n"
+        f"                    _connected = False\n"
+        f"    OUT = {{'found': not _errs, 'error': '; '.join(_errs) if _errs else None,\n"
+        f"          'connected': _connected}}\n"
+    )
+    payload = get_bridge().run_python(guarded(body))
+    return {
+        "success": bool(payload.get("connected")),
+        "function_path": function_path,
+        "from_expression": from_expression,
+        "from_output": from_output,
+        "to_expression": to_expression,
+        "to_input": to_input,
+        "error": payload.get("error"),
+    }
+
+
+def set_material_function_expression_property(
+    function_path: str,
+    expression: str,
+    property_name: str,
+    value,
+    value_type: str = "auto",
+) -> dict:
+    """
+    Sets one editor property on a node inside a MaterialFunction.
+
+    Needed for the same reason as connect_material_function_expressions: the
+    plain set_material_expression_property resolves nodes with
+    `get_material_expressions`, which rejects a MaterialFunction.
+    """
+    security.enforce_tier("set_material_function_expression_property")
+    security.check_destination_path(function_path)
+
+    try:
+        literal = _value_snippet(value, value_type)
+    except (ValueError, IndexError, TypeError) as exc:
+        return {"success": False, "error": str(exc)}
+
+    body = (
+        f"mf = {load_asset(function_path)}\n"
+        f"if mf is None:\n"
+        f"    OUT = {{'found': False, 'error': 'Could not load ' + {function_path!r},"
+        f" 'set': False}}\n"
+        f"else:\n"
+        f"    mel = {UNREAL}.MaterialEditingLibrary\n"
+        f"    _set = False\n"
+        + indent_block(_function_resolve_snippet(expression), 4) +
+        f"    if _target is not None:\n"
+        f"        _target.set_editor_property({property_name!r}, {literal})\n"
+        f"        _set = True\n"
+        f"    OUT = {{'found': _err is None, 'error': _err, 'set': _set}}\n"
+    )
+    payload = get_bridge().run_python(guarded(body))
+    return {
+        "success": bool(payload.get("set")),
+        "function_path": function_path,
+        "expression": expression,
+        "property_name": property_name,
+        "error": payload.get("error"),
+    }
+
+
+def get_material_function_expression_property(
+    function_path: str,
+    expression: str,
+    property_name: str,
+) -> dict:
+    """
+    Reads one editor property off a node inside a MaterialFunction.
+    """
+    security.enforce_tier("get_material_function_expression_property")
+    security.check_destination_path(function_path)
+
+    body = (
+        f"mf = {load_asset(function_path)}\n"
+        f"if mf is None:\n"
+        f"    OUT = {{'found': False, 'error': 'Could not load ' + {function_path!r},"
+        f" 'value': None}}\n"
+        f"else:\n"
+        f"    mel = {UNREAL}.MaterialEditingLibrary\n"
+        f"    _value = None\n"
+        + indent_block(_function_resolve_snippet(expression), 4) +
+        f"    if _target is not None:\n"
+        f"        _raw = _target.get_editor_property({property_name!r})\n"
+        f"        if isinstance(_raw, (bool, int, float, str)):\n"
+        f"            _value = _raw\n"
+        f"        else:\n"
+        f"            _value = str(_raw)\n"
+        f"    OUT = {{'found': _err is None, 'error': _err, 'value': _value}}\n"
+    )
+    payload = get_bridge().run_python(guarded(body))
+    if not payload.get("found"):
+        return {"success": False, "function_path": function_path, "error": payload.get("error")}
+    return {
+        "success": True,
+        "function_path": function_path,
+        "expression": expression,
+        "property_name": property_name,
+        "value": payload.get("value"),
     }

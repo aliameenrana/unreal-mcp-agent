@@ -11,10 +11,14 @@ from mcp.server.mcpserver import MCPServer
 
 from .security import SecurityViolation
 from .tools import (
+    animation,
     assets,
     blueprints,
     components,
+    levels,
     material_graph,
+    physics,
+    play,
     lighting,
     materials,
     meshes,
@@ -83,6 +87,15 @@ for _fn in (
     material_graph.delete_unused_material_expressions,
     material_graph.layout_material_graph,
     material_graph.recompile_material_graph,
+    material_graph.create_material_function,
+    material_graph.list_material_function_expressions,
+    material_graph.create_material_function_expression,
+    material_graph.connect_material_function_expressions,
+    material_graph.set_material_function_expression_property,
+    material_graph.get_material_function_expression_property,
+    material_graph.layout_material_function,
+    material_graph.delete_material_function_expression,
+    material_graph.delete_all_material_function_expressions,
     material_graph.set_material_static_switch_parameter,
 ):
     mcp.add_tool(_wrap(_fn))
@@ -96,6 +109,40 @@ mcp.add_tool(_wrap(components.add_component))
 mcp.add_tool(_wrap(components.remove_component))
 mcp.add_tool(_wrap(components.set_component_property))
 mcp.add_tool(_wrap(components.list_components))
+
+# Collision and physics
+mcp.add_tool(_wrap(physics.get_collision_state))
+mcp.add_tool(_wrap(physics.set_collision_enabled))
+mcp.add_tool(_wrap(physics.set_collision_profile))
+mcp.add_tool(_wrap(physics.set_collision_object_type))
+mcp.add_tool(_wrap(physics.set_collision_response))
+mcp.add_tool(_wrap(physics.set_simulate_physics))
+mcp.add_tool(_wrap(physics.apply_physics_impulse))
+
+# Animation (instance level)
+mcp.add_tool(_wrap(animation.set_animation))
+mcp.add_tool(_wrap(animation.set_animation_mode))
+mcp.add_tool(_wrap(animation.play_animation))
+mcp.add_tool(_wrap(animation.stop_animation))
+mcp.add_tool(_wrap(animation.pause_animation))
+mcp.add_tool(_wrap(animation.set_play_rate))
+mcp.add_tool(_wrap(animation.get_animation_state))
+
+# Play-in-editor and console
+mcp.add_tool(_wrap(play.get_play_state))
+mcp.add_tool(_wrap(play.start_play_in_editor))
+mcp.add_tool(_wrap(play.start_play_in_editor_simulate))
+mcp.add_tool(_wrap(play.stop_play_in_editor))
+mcp.add_tool(_wrap(play.wait_for_play_state))
+mcp.add_tool(_wrap(play.execute_console_command))
+mcp.add_tool(_wrap(play.get_console_variable))
+
+# Levels and world
+mcp.add_tool(_wrap(levels.list_levels))
+mcp.add_tool(_wrap(levels.get_current_level))
+mcp.add_tool(_wrap(levels.save_level))
+mcp.add_tool(_wrap(levels.load_level))
+mcp.add_tool(_wrap(levels.new_level))
 
 # Scene graph / selection
 mcp.add_tool(_wrap(scene.attach_actor))

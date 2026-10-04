@@ -395,7 +395,156 @@ actually does, which differs from the docs in six places.
   change makes a material stop rendering on every mesh that uses it with no
   editor warning, and because saving recompiles the shader — that call needs a
   longer bridge timeout than the 8s default.
-- `create_material_function` — reusable node subgraphs, `MaterialFunctionFactoryNew`, for anything built more than once. NOT built; `create_material_expression_in_function` and the `_in_function` variants of the delete/layout calls exist, but material functions are a separate authoring surface.
+### Material functions (built and live-verified, 9 tools)
+
+A MaterialFunction is a reusable subgraph. Its API is a *parallel* set of
+methods, not the same ones with a different argument, and that is the whole
+source of friction:
+
+- `create_material_expression_in_function` exists, but there is **no
+  `connect_material_expressions_in_function`**. Node-to-node wiring inside a
+  function reuses the plain `connect_material_expressions` — except that the
+  plain one resolves nodes with `get_material_expressions`, which **rejects a
+  MaterialFunction outright** ("Cannot nativize 'MaterialFunction' as
+  'Material', allowed Class type: 'Material'"). So
+  `connect_material_function_expressions`, `set_material_function_expression_property`
+  and `get_material_function_expression_property` exist as function-specific
+  variants, because the material versions cannot be used there. Delete and
+  layout do have `_in_function` variants.
+- **A MaterialFunction has no readable `expressions` property** (the base
+  Material does; on a function it raises). Read nodes with
+  `get_material_function_expressions`, count with
+  `get_num_material_expressions_in_function`.
+- **The two ends take different enums.** `input_type` is a `FunctionInputType`
+  member spelled `FUNCTION_INPUT_*`; the output type is a
+  `CustomMaterialOutputType` member spelled `CMOT_*`. Passing the wrong one
+  raises "Cannot nativize 'CustomMaterialOutputType' as 'FunctionInputType'".
+- **There is no output_type property at all** on a FunctionOutput. Only
+  `output_name` is settable; `CustomMaterialOutputType` exists as an enum but is
+  unreachable from the node. So `create_material_function` has no output_type
+  argument, and the return type follows from what is wired into the output pin.
+- **A function needs a FunctionInput and a FunctionOutput to be usable at all**,
+  so `create_material_function` makes one of each with names and types set.
+- `delete_all_material_expressions_in_function` **leaves the FunctionOutput in
+  place** (verified: 4 nodes in, 1 out, and it is the output), since a function
+  with no output cannot return anything.
+
+### Levels and world (built and live-verified, 5 tools)
+
+Until these existed every tool was scoped to whatever level happened to be open,
+and nothing could see what else existed.
+
+- `list_levels`, `get_current_level`, `save_level`, `load_level`, `new_level`,
+  all through `EditorLoadingAndSavingUtils` (`load_map`, `save_current_level`,
+  `save_map`, `new_blank_map`, `get_dirty_map_packages`).
+- **A level is a `.umap`, not a `.uasset`.** Filtering the asset list on
+  `.uasset` finds no levels at all; skip directory entries (trailing slash) and
+  sub-objects (the `:PersistentLevel.` form) and let `isinstance(obj, World)`
+  decide instead.
+- **`load_level` is destructive and unavoidably so.** It discards every unsaved
+  change in the open level with no prompt; `load_map` does exactly what it says
+  and there is no save-first option. So call `get_current_level` and check
+  `is_dirty` first. The result reports `discarded_dirty_packages` after the fact.
+- **A `World` exposes no `get_actors()` and no `get_levels()` from Python**, so
+  the actor count comes from `EditorActorSubsystem.get_all_level_actors()`.
+- **This project is World Partitioned, and `load_map` returns before its cells
+  finish streaming.** The same level was observed reading 78 actors, then 142,
+  then 138. `load_level` therefore polls from the client until two consecutive
+  equal readings and reports `actor_count_samples` and `streaming_settled`. The
+  polling cannot live in the snippet: that runs on the editor's main thread,
+  where a loop cannot let the engine tick, and `SystemLibrary.delay` needs a
+  `latent_info` a plain exec cannot supply.
+- `new_level(save=False)` leaves an unsaved unnamed level; `save=True` writes it
+  and refuses an existing name.
+
+### Play-in-editor and console (built and live-verified, 7 tools)
+
+- `get_play_state`, `start_play_in_editor`, `start_play_in_editor_simulate`,
+  `stop_play_in_editor`, `wait_for_play_state`, `execute_console_command`,
+  `get_console_variable`, via `LevelEditorSubsystem`.
+- **A begin/end request lands on a later tick**, so the state immediately after
+  a request is the state before it. `get_play_state` and the two request tools
+  report the request and the observed state separately, and
+  `wait_for_play_state` polls in separate round trips.
+- **`unreal.WorldType` does not exist**, and `World` has no `get_world_type()`,
+  so a world cannot be classified by type. `is_simulating` is derived from the
+  game world's path, which is named `UEDPIE_0_<level>` in a PIE session.
+- **`get_editor_world()` returns None while PIE is running**, because the editor
+  world is replaced by the game world. So "no editor world" is a normal reading
+  during play, and `execute_console_command` has to prefer the game world —
+  requiring the editor world first made every command fail exactly when a
+  command is most useful.
+- `execute_console_command`'s 3rd parameter is `specific_player`, a
+  PlayerController, **not a bool**; passing False raises "Cannot nativize 'bool'
+  as 'SpecificPlayer'".
+- **`get_console_variable_*` returns the type's default for an unknown name**
+  rather than raising, and there is no `ConsoleManager` in the Python API, so
+  there is no existence check. `get_console_variable` rejects a value equal to
+  its type's default and reports the variable as missing. Caveat: a variable
+  genuinely set to 0, False or "" is reported missing, and nothing better is
+  available through this API.
+- **Console commands return no output.** That is a property of the editor, not
+  of the tool, and it is reported as `output: None` so nobody waits for it.
+
+### Animation, instance level (built and live-verified, 7 tools)
+
+`set_animation`, `set_animation_mode`, `play_animation`, `stop_animation`,
+`pause_animation`, `set_play_rate`, `get_animation_state`. Not animation
+*authoring*: no montage or Animation Blueprint graph tools.
+
+A SkeletalMeshComponent has far less API than it looks:
+
+- **No `get_animation()`.** The assigned asset lives on the
+  `AnimSingleNodeInstance` returned by `get_anim_instance()`, read with
+  `get_animation_asset()`. In blueprint mode there is no single-node instance,
+  so the asset reads as None, which is correct.
+- **No `get_playback_position()` and no `get_playback_length()`** on the
+  component, and the anim instance's position and length getters are
+  C++-protected and raise AttributeError. Length is therefore read from the
+  `AnimSequence` itself, which does expose `get_play_length`. Position is not
+  readable at all from Python and is reported as None.
+- **No `pause()`.** `pause_animation` holds the frame by setting the play rate
+  to 0, which is why it exists separately from `stop` (which would rewind).
+- `play()` **recreates the anim instance**, and the replacement has no asset on
+  it yet, so `play_animation` reads the asset and length *before* calling play.
+- **Switching mode away from single_node clears the assigned asset.** Verified:
+  set, switch to blueprint, switch back, and the animation reads as unassigned.
+  After `set_animation_mode`, call `set_animation` again.
+- Neither the asset nor the play rate is readable via `get_editor_property`; both
+  raise. `get_play_rate()` and `is_playing()` do exist on the component.
+
+### Collision and physics, instance level (built and live-verified, 7 tools)
+
+`get_collision_state`, `set_collision_enabled`, `set_collision_profile`,
+`set_collision_object_type`, `set_collision_response`, `set_simulate_physics`,
+`apply_physics_impulse`. This is component-level, in the level; the mesh-asset
+side is `set_mesh_collision_preset`.
+
+- **Channels are `unreal.CollisionChannel` with `ECC_*` members**, and responses
+  are `unreal.CollisionResponseType` with `ECR_*`. Neither `unreal.CollisionResponse`
+  (a struct with no ECR_ members) nor bare module-level `ECC_Pawn` exists, and an
+  int is rejected with "Failed to convert parameter 'channel'".
+- **Object type and response are different things.** A component that is a Pawn
+  but has Pawn set to Ignore passes through other pawns. `set_collision_enabled`
+  only turns collision on or off wholesale, and there is deliberately no plain
+  "on": whether something should block, overlap or merely be traceable is a real
+  choice.
+- **A named profile overwrites every channel at once**, so
+  `set_collision_profile_name` undoes any per-channel work: profile first, then
+  channels. It also moves the object type and the enabled state, so restoring in
+  the reverse order leaves the profile reading back as "Custom".
+- **`set_simulate_physics` reports whether it took effect.** A component with no
+  physics body silently refuses to simulate, so the tool returns
+  `took_effect: False` with an explanation rather than success for a change that
+  never happened.
+- **Physics does not run in the editor viewport**, and a PIE session only ticks
+  while the game window has focus. Measured: an actor with simulation on reports
+  a velocity of [0, 0, 0] indefinitely and an impulse changes nothing. These
+  tools can configure and confirm simulation and can read velocity, but cannot
+  observe motion on their own; anything needing frames to pass has to happen while
+  someone is watching the game window.
+- A PrimitiveComponent has **no `get_component_location()` and no
+  `get_attach_location()`**; `get_world_location()` is the form that exists.
 - `create_material_function` — reusable node subgraphs, `MaterialFunctionFactoryNew`, for anything built more than once.
 
 **Texture creation and editing — yes, this is possible, with caveats:**

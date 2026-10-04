@@ -723,6 +723,24 @@ replacement for reading the docs on the next one.
    breaks the build the same way. Likewise a name computed on the caller's side
    has no binding on the editor's: interpolate it as `{label!r}`, never
    reference a bare `label`.
+13. **Do not assume a struct or class has the members its C++ equivalent has.**
+    `World` has no `get_actors()` or `get_levels()` from Python;
+    `SkeletalMeshComponent` has no `get_animation()`, `pause()`,
+    `get_playback_position()` or `get_playback_length()`; `PrimitiveComponent`
+    has no `get_component_location()`. Check `dir()` on the live object and
+    `hasattr` on a real instance, not the stub and not the docs — the Python
+    API is a narrower slice than the class it wraps.
+14. **A setter can succeed and change nothing.** `set_simulate_physics` on a
+    component with no physics body returns normally and does not simulate;
+    `execute_console_command` dispatches and returns no output; switching a
+    component out of single-node animation mode drops the assigned asset. Read
+    the value back and report `took_effect` rather than reporting the call.
+15. **Asynchronous operations need polling in separate round trips.** A play-in-
+    editor request lands on a later tick, and a World Partitioned level streams
+    in after `load_map` returns. A loop *inside* the snippet cannot work: it
+    runs on the editor's main thread, where the engine cannot tick. Poll from
+    the client, and require more than one identical reading, since a pause can
+    coincide with the middle of a stream.
 
 ---
 
