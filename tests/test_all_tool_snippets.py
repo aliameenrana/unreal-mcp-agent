@@ -105,6 +105,25 @@ DUMMY = {
     "ground_albedo": (0.3, 0.3, 0.3),
     "rayleigh_scattering": (0.5, 0.5, 0.5),
     "include_inherited": False,
+    "package_path": "/Game/MCPTest",
+    "table_name": "ZZAudit",
+    "row_struct_class": "/Script/GameplayTags.GameplayTagTableRow",
+    "table_path": "/Game/MCPTest/ZZAudit.ZZAudit",
+    "fmt": "csv",
+    "max_rows": 5,
+}
+
+# Per-tool extras, for arguments whose meaning is tool-specific.
+#
+# `offset` and `limit` deliberately live here rather than in DUMMY: both names are
+# reused across tools with different types. scene.duplicate_actor takes an
+# optional `offset` that it unpacks as three floats, while
+# data_tables.list_data_table_rows takes an `offset` int index. Supplying one
+# global value silently broke duplicate_actor, which raised unpacking an int
+# before it ever built a snippet. A globally supplied optional argument is a
+# hazard: it reaches tools the entry was never written for.
+PER_TOOL = {
+    "list_data_table_rows": {"offset": 0, "limit": 2},
 }
 
 # A payload shaped like a real editor reply. Tools read specific keys out of it
@@ -180,18 +199,22 @@ TOOL_MODULES = {
 
 def _kwargs(fn) -> dict | None:
     """Representative kwargs for fn, or None if an argument is not mapped."""
+    params = inspect.signature(fn).parameters
+    extra = PER_TOOL.get(fn.__name__, {})
     out = {}
-    for name, param in inspect.signature(fn).parameters.items():
-        if param.default is not inspect.Parameter.empty:
+    for name, param in params.items():
+        if name in extra:
+            out[name] = extra[name]
+        elif param.default is not inspect.Parameter.empty:
             # The destructive tier gates on confirm, which defaults to False.
             if name == "confirm":
                 out[name] = True
             elif name in DUMMY:
                 out[name] = DUMMY[name]
-            continue
-        if name not in DUMMY:
+        elif name in DUMMY:
+            out[name] = DUMMY[name]
+        else:
             return None
-        out[name] = DUMMY[name]
     return out
 
 

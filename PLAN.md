@@ -914,3 +914,28 @@ Re-verifying lighting and presets live (73/73 checks) found two real bugs:
   nothing. It now validates the base and reports failed variants by name.
 
 Both bugs passed the existing tests because the tests asserted the buggy shape.
+
+### Data Tables: create and read only (verified, row writes blocked)
+
+Four tools live-verified, 54/54 checks: `create_data_table`,
+`get_data_table_info`, `list_data_table_rows`, `export_data_table`. Plus 13
+offline unit tests.
+
+Row authoring is **not buildable** over Remote Control.
+`DataTableFunctionLibrary.fill_data_table_from_json_string` deadlocks the editor:
+it is dispatched on the game thread and its reimport wants the game thread too.
+Running it on a worker thread inside the editor fails differently, with
+"Attempted to access Unreal API from outside the main game thread". Both are
+measured, not inferred, and the verification script asserts the limit against the
+editor. The tools report `rows_writable_from_bridge: False` so a caller is never
+told a row can be added when it cannot.
+
+Cells read back through `get_data_table_column_as_string`, so they are formatted
+strings rather than typed values; a DataTable cell cannot be read into a typed
+Python value through any exposed API. Column internal and export names are both
+returned; measured identical for every struct tried.
+
+This closes the Data Tables category only in its read-only form. Landscape and
+foliage, Niagara, multiplayer and the remaining presets are still unbuilt, and
+each involves asset creation or world mutation, which is the class of operation
+that just proved capable of wedging the editor.

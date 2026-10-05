@@ -947,3 +947,68 @@ Both fixes went through several rounds of broken generated code because of this:
 produces an f-string SyntaxError that names nothing useful. `lighting._out()`
 builds the dict by joining `key: value` source pairs instead, with no f-string
 involved, so there is nothing to double.
+
+---
+
+## The game-thread deadlock: what cannot be built over Remote Control, and why
+
+Two calls wedged the editor during Data Table work, and the reason is structural.
+It is worth writing down because it rules out a whole class of tools, and because
+the obvious workarounds do not work.
+
+`DataTableFunctionLibrary.fill_data_table_from_json_string` (and the CSV twin)
+**deadlocks the editor** when invoked over Remote Control. The call arrives on the
+game thread; the reimport it triggers wants the game thread; the handler blocks
+waiting for a thread that is itself blocked. The editor stops answering entirely,
+holding port 30010 open at high CPU, and every call then fails with
+`NoEditorFoundError`. Recovery needs an editor restart.
+
+Moving the same call onto a worker thread *inside* the editor does not help.
+Unreal rejects it outright:
+
+    RuntimeError: DataTableFunctionLibrary: Attempted to access Unreal API from
+    outside the main game thread
+
+So there is no in-language escape. `fill_data_table_*` is the only known member of
+that family, and it is the whole of DataTable row authoring. Data Tables are
+therefore built as **create-and-read only**: `create_data_table`,
+`get_data_table_info`, `list_data_table_rows`, `export_data_table`. They carry
+`rows_writable_from_bridge: False` so a caller is not misled, and the limit is
+asserted against the editor in the verification script rather than taken on trust.
+
+The general lesson, and it applies well beyond Data Tables:
+
+- **Anything that triggers a reimport, a recompile, or a synchronous asset save
+  from inside a Remote Control handler is a deadlock candidate.** Test such calls
+  on a disposable project with a short client timeout, never as part of a longer
+  chain, because the cost of getting it wrong is an editor restart.
+- **When a call wedges the editor, bisect it before retrying it.** I assumed
+  `AssetTools.create_asset` caused the first wedge and retried it; it was fine. The
+  culprit was a later call in the same probe. Bisecting costs one cheap call and
+  saves an editor session.
+- **Unreal is single-threaded for its API from Python, and Remote Control's HTTP
+  handler runs on that thread.** Any design that needs genuine concurrency has to
+  move the work into C++ or into a deferred command the engine completes later.
+
+### Related: `delete_asset` reports a false failure
+
+`EditorAssetLibrary.delete_asset` returns True meaning the delete was *initiated*.
+The asset does not disappear immediately, and the tool's `still_exists` check runs
+in the same snippet, before the unload completes, so a successful delete came back
+as `{"success": false, "deleted": true, "still_exists": true}` — three fields that
+contradict each other. An asset with no references (a Data Table created and
+dropped) deletes straight away; one still loaded, or held by an editor window,
+does not, and closing all editors for it via
+`AssetEditorSubsystem.close_all_editors_for_asset` was not enough either. Deleting
+an asset and confirming it are two different operations and the tool collapses
+them. Worth fixing before anyone relies on the return value.
+
+### Related: a globally-supplied optional argument is a hazard
+
+`tests/test_all_tool_snippets.py` fills required arguments from a shared table and
+also offers optional ones by name. Adding `"offset": 0` for
+`list_data_table_rows` silently broke `scene.duplicate_actor`, whose optional
+`offset` is a 3-tuple it unpacks: it raised unpacking an int before it ever built a
+snippet, so the tool stopped being covered at all and the only symptom was an
+unrelated test failing. Arguments whose names are reused across tools with
+different types now live in a per-tool table instead of the shared one.

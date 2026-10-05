@@ -11,6 +11,7 @@ from mcp.server.mcpserver import MCPServer
 
 from .security import SecurityViolation
 from .tools import (
+    data_tables,
     animation,
     assets,
     blueprints,
@@ -179,6 +180,13 @@ mcp.add_tool(_wrap(meshes.get_mesh_collision_info))
 mcp.add_tool(_wrap(meshes.set_mesh_collision_preset))
 mcp.add_tool(_wrap(meshes.import_static_mesh))
 mcp.add_tool(_wrap(meshes.import_skeletal_mesh))
+
+# Data Tables (create and read; row writes are unreachable from Python, see the
+# module docstring)
+mcp.add_tool(_wrap(data_tables.create_data_table))
+mcp.add_tool(_wrap(data_tables.get_data_table_info))
+mcp.add_tool(_wrap(data_tables.list_data_table_rows))
+mcp.add_tool(_wrap(data_tables.export_data_table))
 
 # Lighting
 mcp.add_tool(_wrap(lighting.set_light_properties))
