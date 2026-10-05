@@ -866,3 +866,15 @@ in the materials section above; the short version is that `material_domain` is
 a settable property, `shading_model` has no setter but responds to
 `set_editor_property`, and read-back is a repr string that has to be compared by
 enum name.
+
+### Textures and material-function calls (verified)
+
+Four tools live-verified, 51/51 checks: `generate_texture_from_pixels`,
+`set_texture_properties`, `get_texture_info`, `create_material_function_call`.
+Plus 6 offline unit tests for the PNG encoder.
+
+Pixel read-back is impossible on a Texture2D in this build (`platform_data`,
+`source`, `pixel_format`, `cached_num_mips` all raise), so a generated texture
+is verified as a real Texture2D at the right dimensions, not as a verified pixel
+round trip. Material-to-texture baking is not buildable through Python at all:
+no `KismetRenderingLibrary`, no usable draw on `CanvasRenderTarget2D`.

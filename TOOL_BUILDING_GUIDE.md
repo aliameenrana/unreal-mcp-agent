@@ -799,3 +799,42 @@ installed, or otherwise can't do what the catalog entry assumed:
   snippet syntax with real pytest tests already; that's a different,
   narrower kind of test than the live-editor verification this guide
   describes, and both are needed, but don't conflate them.)
+
+---
+
+## Texture2D: what is and is not reachable from Python (measured, UE 5.8)
+
+Four texture tools are live-verified (51/51 checks). Recording the API
+deviations, because each one cost a live probe to discover and each one is
+the kind of thing that is easy to guess wrong:
+
+- **`platform_data`, `source`, `pixel_format` and `cached_num_mips` all raise
+  on a Texture2D.** You cannot read a single pixel back through any of them,
+  and you cannot confirm the pixel format of a texture you just wrote. So
+  `get_texture_info` reports `pixel_format: None` and sets a `_readable: False`
+  flag per property, rather than guessing the format from the compression
+  setting. A generated texture is verifiable as *a real Texture2D at the right
+  dimensions*; the pixel round trip is not verifiable at all, and claiming
+  otherwise would be a lie.
+- **`ModelingObjectsCreationAPI.create_texture_object` does not accept pixel
+  bytes.** `CreateTextureObjectParams` wants an already-built transient
+  texture object, which is the thing you do not have. Writing pixels therefore
+  goes via a real PNG on disk plus `AssetImportTask` + `TextureFactory`, which
+  does work: encode RGBA with `struct` + `zlib`, drop it under Saved, import it.
+  That is what `generate_texture_from_pixels` does.
+- **Never hardcode Unreal enum member names from the C++ header.** My first
+  allowlists were wrong twice: there is no `TC_MASK` (it is `TC_MASKS`), and
+  there are no `TF_SHARPEN*` members at all. A wrong name surfaces as an
+  `AttributeError` from inside the editor that looks like an editor bug.
+  `set_texture_properties` now validates against the live enum and returns the
+  available members in the error.
+- **`lod_bias` is set as a float but reads back as an int**, so 2.5 stores as 2
+  and a fractional bias is silently truncated. Pass whole numbers.
+- **Material-to-texture rendering is not buildable here.** `KismetRenderingLibrary`
+  is absent, and `CanvasRenderTarget2D` exists but exposes no usable draw call,
+  so there is no path from a material to a baked texture through Python. Don't
+  plan a `bake_material_to_texture` tool around it without the C++ escape hatch.
+- The material-function-call node is `MaterialExpressionMaterialFunctionCall`,
+  not `MaterialExpressionFunctionCall`. Note that `create_material_function`
+  returns a *package* path (`/Game/Path/Name`), so you must append
+  `.{Name}` yourself before passing it to anything that loads an object.

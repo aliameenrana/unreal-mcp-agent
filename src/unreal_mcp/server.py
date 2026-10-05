@@ -19,6 +19,7 @@ from .tools import (
     material_graph,
     physics,
     play,
+    textures,
     lighting,
     materials,
     meshes,
@@ -109,6 +110,12 @@ mcp.add_tool(_wrap(components.add_component))
 mcp.add_tool(_wrap(components.remove_component))
 mcp.add_tool(_wrap(components.set_component_property))
 mcp.add_tool(_wrap(components.list_components))
+
+# Textures and material function calls
+mcp.add_tool(_wrap(textures.generate_texture_from_pixels))
+mcp.add_tool(_wrap(textures.set_texture_properties))
+mcp.add_tool(_wrap(textures.get_texture_info))
+mcp.add_tool(_wrap(textures.create_material_function_call))
 
 # Collision and physics
 mcp.add_tool(_wrap(physics.get_collision_state))
