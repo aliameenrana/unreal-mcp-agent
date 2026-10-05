@@ -878,3 +878,18 @@ Pixel read-back is impossible on a Texture2D in this build (`platform_data`,
 is verified as a real Texture2D at the right dimensions, not as a verified pixel
 round trip. Material-to-texture baking is not buildable through Python at all:
 no `KismetRenderingLibrary`, no usable draw on `CanvasRenderTarget2D`.
+
+### Blueprint structure reading (verified)
+
+Seven tools live-verified, 61/61 checks: `create_blueprint`,
+`get_blueprint_info`, `list_blueprint_graphs`, `list_blueprint_functions`,
+`list_blueprint_events`, `list_blueprint_variables`,
+`list_blueprint_event_dispatchers`. Plus 7 offline unit tests.
+
+Blueprint *structure* is fully readable: parent class, graphs, functions, events,
+event dispatchers and member variables. Blueprint *node contents* are not
+readable at all: `EdGraph.Nodes` is protected and nodes are not addressable by
+object path, so the node-level helpers in `BlueprintEditorLibrary` are
+unreachable. Node reading still needs the C++ escape hatch. The tools say so
+explicitly (`nodes_readable: False`) rather than implying coverage they do not
+have.

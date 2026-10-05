@@ -838,3 +838,53 @@ the kind of thing that is easy to guess wrong:
   not `MaterialExpressionFunctionCall`. Note that `create_material_function`
   returns a *package* path (`/Game/Path/Name`), so you must append
   `.{Name}` yourself before passing it to anything that loads an object.
+
+---
+
+## Blueprints: structure is readable, node contents are not (measured, UE 5.8)
+
+Seven Blueprint tools live-verified (61/61 checks). The dividing line is hard
+and worth knowing before you plan anything:
+
+- **`EdGraph.Nodes` is a protected property.** Reading it raises "Property
+  'Nodes' for attribute 'nodes' on 'EdGraph' is protected and cannot be read".
+  Graph nodes are also *not* addressable by object path, so you cannot reach one
+  even if you guessed its name. That means the node-level helpers that genuinely
+  exist in `BlueprintEditorLibrary` — `get_node_title`, `get_node_pos`,
+  `get_node_size`, `get_node_category`, `list_input_pins`, `list_output_pins`,
+  `list_all_pins`, `get_nodes_in_comment` — are all unreachable, because every
+  one of them needs a node handle you have no way to get. `list_blueprint_graphs`
+  returns `nodes_readable: False` with the reason attached rather than letting
+  anyone read it as a node listing. Enumerating nodes needs the C++ escape
+  hatch.
+- **`create_blueprint_asset_with_parent(asset_path, parent_class)` takes a
+  package path, not an object path.** Pass `'/Game/MCPTest/BP_Thing'`. Pass
+  `'/Game/MCPTest/BP_Thing.BP_Thing'` and it does not reject it, it sanitises the
+  dot into the asset name and creates `BP_Thing_BP_Thing`. So `create_blueprint`
+  refuses a dotted path outright rather than letting that happen.
+- **Its return value is untrustworthy.** It returns `None` when the asset already
+  exists, *and* it returns `None` in cases where it did create the asset anyway.
+  Do not use the return to decide success. `create_blueprint` loads the asset
+  back and uses that as the evidence, and reports `editor_returned_none` so the
+  caller can see which happened.
+- **`BlueprintFunctionInfo` fields are `name`, `description`,
+  `is_implemented`** — not `function_name`, which is what the C++ suggests.
+- **Descriptions come back as raw `NSLOCTEXT("NSLOCTEXT", "Key", "text")`**, and
+  some run to 600+ characters. Cleaned to the tooltip text and truncated.
+- **`EdGraphPinType` exposes no readable fields.** `str()` on one renders as
+  `<Struct 'EdGraphPinType' (0x...) {}>` for *every* type, identical apart from
+  the address, so it cannot be used as a type name. The only informative
+  rendering is `pin_type_to_json_schema(pin_type, self_context)`, which
+  `list_blueprint_variables` returns. Its limitation: it does not distinguish
+  `int32` from `float`, both report `{"type": "integer"}`, so that caveat is
+  returned on the result as `type_format`.
+- **`EdGraphPinType()` has no settable `pin_category`** — the struct is empty to
+  Python. For a typed variable use
+  `BlueprintEditorLibrary.get_basic_type_by_name("float")`; a bare
+  `EdGraphPinType()` produces a variable whose schema reads as `integer`.
+- **`set_blueprint_variable_category` silently no-ops on a variable that does not
+  exist**, returning None as if it had worked. Don't treat its return as proof.
+- **`indent_block()` defaults to `spaces=0`.** Splicing its output under an
+  `else:` needs `spaces=4`. Getting this wrong produces an
+  `IndentationError: expected an indented block after 'else'`, which
+  `guarded()` catches locally, so it fails fast rather than in the editor.

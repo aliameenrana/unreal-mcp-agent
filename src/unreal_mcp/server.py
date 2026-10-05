@@ -104,6 +104,13 @@ mcp.add_tool(_wrap(materials.get_material_parameter_list))
 
 # Blueprints
 mcp.add_tool(_wrap(blueprints.compile_blueprint))
+mcp.add_tool(_wrap(blueprints.create_blueprint))
+mcp.add_tool(_wrap(blueprints.get_blueprint_info))
+mcp.add_tool(_wrap(blueprints.list_blueprint_graphs))
+mcp.add_tool(_wrap(blueprints.list_blueprint_functions))
+mcp.add_tool(_wrap(blueprints.list_blueprint_events))
+mcp.add_tool(_wrap(blueprints.list_blueprint_variables))
+mcp.add_tool(_wrap(blueprints.list_blueprint_event_dispatchers))
 
 # Components
 mcp.add_tool(_wrap(components.add_component))
