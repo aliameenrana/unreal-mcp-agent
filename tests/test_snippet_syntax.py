@@ -43,7 +43,10 @@ class _FakeBridge:
     def __init__(self):
         self.last_expr: str | None = None
         self.last_timeout = None
-        self.result = "fake-result"
+        # A realistic editor reply. guarded() bodies always set 'found' and
+        # 'error', and tools branch on 'found' before reading any other key, so a
+        # bare string here would fail every one of them with AttributeError.
+        self.result = {"found": True, "error": None, "value": None, "type": None}
 
     def run_python(self, expression: str, timeout=None):
         # Mirrors the real signature: tools that wait on a shader compile pass
@@ -53,6 +56,11 @@ class _FakeBridge:
         _assert_no_lambda_subscript(expression)
         ast.parse(expression)  # raises SyntaxError if the f-string building is broken
         return self.result
+
+
+def _found(**fields):
+    """A successful guarded() payload, as the editor returns one."""
+    return {"found": True, "error": None, "value": None, "type": None, **fields}
 
 
 def _assert_no_lambda_subscript(expr: str) -> None:
@@ -157,7 +165,7 @@ def test_compile_blueprint_snippet_is_valid(fake_bridge):
 
 def test_light_scene_preset_snippet_is_valid(monkeypatch, fake_bridge):
     # The preset's read-back getters unpack a dict, not a string.
-    monkeypatch.setattr(fake_bridge, "result", {"intensity": 1.0})
+    monkeypatch.setattr(fake_bridge, "result", _found(actor_name="DirectionalLight"))
     presets.light_scene_preset("golden_hour")
 
 
@@ -207,7 +215,9 @@ def test_set_light_properties_rejects_temperature_on_skylight(fake_bridge):
 
 
 def test_get_light_properties_snippet_is_valid(monkeypatch, fake_bridge):
-    monkeypatch.setattr(fake_bridge, "result", {"intensity": 1.0, "color": [1, 1, 1]})
+    monkeypatch.setattr(
+        fake_bridge, "result",
+        _found(actor_name="DirectionalLight", intensity=1.0, color=[1, 1, 1]))
     assert lighting.get_light_properties()["success"] is True
 
 
@@ -216,7 +226,7 @@ def test_set_exponential_fog_params_snippet_is_valid(fake_bridge):
 
 
 def test_get_exponential_fog_params_snippet_is_valid(monkeypatch, fake_bridge):
-    monkeypatch.setattr(fake_bridge, "result", {"fog_density": 0.0436})
+    monkeypatch.setattr(fake_bridge, "result", _found(fog_density=0.0436))
     assert lighting.get_exponential_fog_params()["success"] is True
 
 
@@ -227,7 +237,7 @@ def test_set_sky_atmosphere_params_snippet_is_valid(fake_bridge):
 
 
 def test_get_sky_atmosphere_params_snippet_is_valid(monkeypatch, fake_bridge):
-    monkeypatch.setattr(fake_bridge, "result", {"atmosphere_height": 60.0})
+    monkeypatch.setattr(fake_bridge, "result", _found(atmosphere_height=60.0))
     assert lighting.get_sky_atmosphere_params()["success"] is True
 
 
@@ -304,17 +314,31 @@ def test_actor_component_parenthesizes_the_actor_expression():
         lambda: lighting.get_light_properties(),
         lambda: lighting.get_exponential_fog_params(),
         lambda: lighting.get_sky_atmosphere_params(),
-        lambda: scene.get_mesh_material_slot("Cube_0"),
     ],
 )
-def test_read_back_tools_end_on_the_payload(monkeypatch, fake_bridge, call):
+def test_lighting_getters_return_the_payload_not_the_actor_name(monkeypatch,
+                                                                fake_bridge, call):
     """
-    seq() returns its last element, so a getter that puts the actor name after
-    the payload silently returns the name, and the tool then fails unpacking a
-    string where it expected a dict.
+    seq() yields its last element, so a getter that put the actor name after the
+    payload returned the name and then failed unpacking a string. The lighting
+    getters no longer use seq(): each assigns an OUT dict, so the property read
+    cannot be displaced by the name. Assert that shape rather than the old one.
+    """
+    monkeypatch.setattr(fake_bridge, "result", _found(actor_name="Something_0"))
+    result = call()
+    expr = fake_bridge.last_expr
+    assert "OUT = {" in expr
+    assert "'actor_name': a.get_name()" in expr
+    assert result["actor_name"] == "Something_0"
+
+
+def test_get_mesh_material_slot_ends_on_the_payload(monkeypatch, fake_bridge):
+    """
+    get_mesh_material_slot still uses seq(), so it keeps the original invariant:
+    the snippet must evaluate to the payload, not to the actor name.
     """
     monkeypatch.setattr(fake_bridge, "result", {"ok": True})
-    call()
+    scene.get_mesh_material_slot("Cube_0")
     assert "lambda" in _seq_last_element(fake_bridge.last_expr)
 
 
@@ -973,3 +997,56 @@ def test_create_material_passes_the_overwrite_flag_positionally(fake_bridge):
     # UNREAL expands to __import__('unreal'), so match on the tail of the call.
     assert "MaterialFactoryNew(), 'None', False)" in snippet
     assert "MaterialFactoryNew())" not in snippet
+
+
+@pytest.mark.parametrize(
+    "call",
+    [
+        lambda: lighting.get_light_properties("NoSuchLight"),
+        lambda: lighting.set_light_properties("NoSuchLight", intensity=1.0),
+        lambda: lighting.get_exponential_fog_params("NoSuchFog"),
+        lambda: lighting.set_exponential_fog_params("NoSuchFog", fog_density=0.1),
+        lambda: lighting.get_sky_atmosphere_params("NoSuchSky"),
+        lambda: lighting.set_sky_atmosphere_params("NoSuchSky", atmosphere_height=50.0),
+    ],
+)
+def test_lighting_tools_report_a_missing_actor_instead_of_raising(
+    monkeypatch, fake_bridge, call
+):
+    """
+    Regression: the lighting tools used to send bare json_dumps expressions with
+    no guarded() wrapper, so a missing actor raised StopIteration inside the
+    editor and came back as RemoteCommandFailedError with an empty log. Now the
+    editor reports found=False and the tool turns that into a normal error dict.
+    """
+    monkeypatch.setattr(
+        fake_bridge, "result",
+        {"found": False, "error": "No actor named 'NoSuchThing' in the current level"},
+    )
+    result = call()
+    assert result["success"] is False
+    assert "NoSuch" in result["error"]
+
+
+def test_apply_material_variant_set_refuses_a_missing_base(fake_bridge):
+    """
+    Regression: a base path that does not resolve made create_material_instance
+    return a null instance_path, which was appended to the results, so the call
+    reported {"success": True, "count": 1, "instance_paths": [None]} and created
+    nothing. asset_exists() is stubbed False here, so no bridge call happens.
+    """
+    fake_bridge.result = {"found": False, "error": None,
+                          "asset_path": "/Game/MCPTest/ZZNope.ZZNope", "exists": False}
+    result = presets.apply_material_variant_set(
+        "/Game/MCPTest", "/Game/MCPTest/ZZNope.ZZNope", [{"name": "V1"}]
+    )
+    assert result["success"] is False
+    assert "not found" in result["error"]
+    assert result["instance_paths"] == []
+    assert fake_bridge.last_expr is None
+
+
+def test_apply_material_variant_set_rejects_an_empty_base(fake_bridge):
+    result = presets.apply_material_variant_set("/Game/MCPTest", "", [{"name": "V1"}])
+    assert result["success"] is False
+    assert fake_bridge.last_expr is None

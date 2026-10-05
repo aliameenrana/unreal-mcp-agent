@@ -11,6 +11,7 @@ import random
 
 from .. import security
 from . import lighting, materials, scene
+from .assets import asset_exists
 
 
 def light_scene_preset(mood: str) -> dict:
@@ -199,21 +200,51 @@ def apply_material_variant_set(
     "scalar"/"vector" keys are optional per-variant. Returns the list of
     created instance paths. Common for team colors, rarity tiers, damage
     states: anything that is "the same material, N color variations."
+
+    `base_material_path` is checked first. It used to be taken on trust, and a
+    path that does not resolve made `create_material_instance` return a dict with
+    a null instance_path, which this function then appended to its results: the
+    call reported {"success": True, "count": 1, "instance_paths": [None]} and
+    created nothing. A missing base is now an error, and a variant that fails to
+    create is reported by name instead of being counted.
     """
     security.enforce_tier("apply_material_variant_set")
-    created = []
+    if not base_material_path.strip():
+        return {"success": False, "error": "base_material_path must not be empty."}
+    if not asset_exists(base_material_path)["exists"]:
+        return {"success": False,
+                "error": f"base material not found: {base_material_path}",
+                "count": 0, "instance_paths": []}
+
+    created: list[str] = []
+    failed: list[dict] = []
     for variant in variants:
         name = variant["name"]
-        instance = materials.create_material_instance(asset_path, name, base_material_path)
-        instance_path = instance["instance_path"]
+        instance = materials.create_material_instance(
+            asset_path, name, base_material_path
+        )
+        instance_path = instance.get("instance_path")
+        if not instance.get("success") or not instance_path:
+            failed.append({"name": name, "error": instance.get("error")
+                           or "the editor returned no instance path"})
+            continue
 
         for param_name, value in variant.get("scalar", {}).items():
             materials.set_material_scalar_parameter(instance_path, param_name, value)
 
         for param_name, rgba in variant.get("vector", {}).items():
             r, g, b, *a = rgba
-            materials.set_material_vector_parameter(instance_path, param_name, r, g, b, a[0] if a else 1.0)
+            materials.set_material_vector_parameter(
+                instance_path, param_name, r, g, b, a[0] if a else 1.0
+            )
 
         created.append(instance_path)
 
-    return {"success": True, "count": len(created), "instance_paths": created}
+    return {
+        "success": not failed,
+        "count": len(created),
+        "requested": len(variants),
+        "instance_paths": created,
+        "failed": failed,
+        **({"error": f"could not create: {failed}"} if failed else {}),
+    }

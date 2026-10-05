@@ -888,3 +888,62 @@ and worth knowing before you plan anything:
   `else:` needs `spaces=4`. Getting this wrong produces an
   `IndentationError: expected an indented block after 'else'`, which
   `guarded()` catches locally, so it fails fast rather than in the editor.
+
+---
+
+## Two bugs found by re-verifying old tools, and how they hid
+
+Re-verifying lighting and presets after they had been untouched for a while found
+two real defects. Both are the kind that pass every test that exists, because the
+tests asserted the shape the buggy code already had.
+
+### 1. The lighting tools sent bare snippets, so any error was opaque
+
+All six lighting tools built a `json_dumps(seq(...))` expression and sent it
+directly. `seq()` yields its last element, and the actor lookup was
+`next(genexp)` without `optional=True`, so a missing actor raised StopIteration
+inside the editor. Since the snippet was not wrapped in `guarded()`, the exception
+surfaced at the caller as:
+
+    RemoteCommandFailedError: Remote command failed: []
+
+An empty log, no mention of which light was missing. Every other tool in the repo
+returns `{"success": False, "error": ...}`. All six now build an `OUT` dict
+through `guarded()`, resolve the actor optionally, and check the component for
+`None` before reading from it. `lighting._body()` wraps that shape so it is
+written once.
+
+The lesson generalises: **a tool that does not use `guarded()` has no way to
+report an in-editor error, it can only raise.** That is the whole reason guarded()
+exists, and a module that predates it is the module most likely to still be
+missing it.
+
+The tests here had asserted the buggy shape. `test_read_back_tools_end_on_the_payload`
+checked that a getter's snippet ends on a `lambda`, which was a proxy for "does not
+return the actor name by mistake". It now asserts the stronger property that
+actually guarantees it: the snippet assigns an `OUT` dict.
+
+### 2. `apply_material_variant_set` reported phantom success
+
+Pointed at a base material path that does not resolve,
+`create_material_instance` returns a dict with a null `instance_path`. The function
+appended that null to its results and returned:
+
+    {"success": True, "count": 1, "instance_paths": [None]}
+
+Nothing was created, and the caller was told one instance existed. It now checks
+the base up front, refuses an empty base, and reports any variant that failed to
+create by name instead of counting it.
+
+Worth generalising: **a tool that appends a value to a results list without
+checking it is truthy will report success for work it did not do.**
+`create_material_instance` returning a null path in a success-shaped dict is the
+upstream half of this; nothing downstream checked.
+
+### Do not hand-write a dict literal inside an f-string
+
+Both fixes went through several rounds of broken generated code because of this:
+`f"OUT = {{'found': False}}"` needs every brace doubled, and doubling the wrong one
+produces an f-string SyntaxError that names nothing useful. `lighting._out()`
+builds the dict by joining `key: value` source pairs instead, with no f-string
+involved, so there is nothing to double.

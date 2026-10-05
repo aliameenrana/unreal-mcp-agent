@@ -27,9 +27,20 @@ from ..remote_snippets import (
     actor_component,
     find_actor_by_class,
     find_actor_by_name,
-    json_dumps,
-    seq,
+    guarded,
+    indent_block,
 )
+
+
+def _out(pairs: dict[str, str]) -> str:
+    """
+    Source text for an OUT dict whose values are already source expressions.
+
+    Built with str.format-free string joining rather than an f-string, because a
+    literal dict inside an f-string needs every brace doubled, and doubling the
+    wrong one produces an f-string syntax error that names nothing useful.
+    """
+    return "OUT = {" + ", ".join(f"{k!r}: {v}" for k, v in pairs.items()) + "}"
 
 
 def _resolve(actor_name: str | None, default_class: str) -> str:
@@ -37,10 +48,59 @@ def _resolve(actor_name: str | None, default_class: str) -> str:
     Actor expression for a named actor, or for the level's single instance of
     a class. The lighting actors are singletons with UAID-suffixed object
     names, so class lookup is the only addressable form for them.
+
+    Always optional: a missing actor yields None so the tool can report it
+    rather than raising StopIteration inside the editor.
     """
     if actor_name is None:
         return find_actor_by_class(default_class)
     return find_actor_by_name(actor_name)
+
+
+def _missing_message(actor_name: str | None, default_class: str) -> str:
+    if actor_name is None:
+        return f"No {default_class} in the current level"
+    return f"No actor named {actor_name!r} in the current level"
+
+
+def _body(actor_expr: str, actor_name: str | None, default_class: str,
+          component_class: str, inner: str) -> str:
+    """
+    Wraps `inner`, which may assume both `a` (the actor) and `c` (the component)
+    are bound, in a body that resolves them and reports a missing actor or a
+    missing component as a plain error.
+
+    Every tool here goes through this. Without it a missing actor raises
+    StopIteration and a missing component raises AttributeError, and since these
+    snippets are sent bare rather than through guarded(), either one arrives at the
+    caller as RemoteCommandFailedError with an empty log and no indication of
+    which light was missing.
+    """
+    actor_missing = _missing_message(actor_name, default_class)
+    component_missing = (
+        f"{actor_missing}, and it carries no {component_class}"
+    )
+    return (
+        f"a = {actor_expr}\n"
+        f"if a is None:\n"
+        f"    " + _out({"found": "False", "error": repr(actor_missing)}) + "\n"
+        f"else:\n"
+        f"    c = a.get_component_by_class({UNREAL}.{component_class})\n"
+        f"    if c is None:\n"
+        f"        " + _out({"found": "False", "error": repr(component_missing)}) + "\n"
+        f"    else:\n"
+        f"{indent_block(inner, spaces=8)}"
+    )
+
+
+def _fail(actor_name: str | None, payload: dict, fallback: str) -> dict:
+    return {"success": False, "actor_name": actor_name,
+            "error": payload.get("error") or fallback}
+
+
+def _ok(payload: dict, **fields) -> dict:
+    return {"success": True,
+            "actor_name": payload.get("actor_name"), **fields}
 
 
 def _apply_to_component(component: str, parts: list[str]) -> str:
@@ -71,9 +131,6 @@ def set_light_properties(
     so passing it for a skylight is an error rather than a silent no-op.
     """
     security.enforce_tier("set_light_properties")
-    actor_expr = _resolve(actor_name, default_class)
-    component = actor_component(actor_expr, "LightComponentBase")
-
     if temperature is not None and default_class == "SkyLight" and actor_name is None:
         return {
             "success": False,
@@ -99,16 +156,23 @@ def set_light_properties(
             "error": "Nothing to do: pass intensity, color, and/or temperature.",
         }
 
-    expr = json_dumps(seq(_apply_to_component(component, parts), repr(actor_name)))
-    result = get_bridge().run_python(expr)
-    return {
-        "success": True,
-        "actor_name": result,
-        "default_class": default_class if actor_name is None else None,
-        "intensity": intensity,
-        "color": color,
-        "temperature": temperature,
-    }
+    actor_expr = _resolve(actor_name, default_class)
+    component = actor_component(actor_expr, "LightComponentBase")
+    inner = (
+        _apply_to_component(component, parts)
+        + "\n"
+        + _out({"found": "True", "error": "None",
+                "actor_name": "a.get_name()"})
+    )
+    body = _body(actor_expr, actor_name, default_class, "LightComponentBase", inner)
+    payload = get_bridge().run_python(guarded(body))
+    if not payload.get("found"):
+        return _fail(actor_name, payload, "could not set light properties")
+    return _ok(payload,
+               default_class=default_class if actor_name is None else None,
+               intensity=intensity,
+               color=color,
+               temperature=temperature)
 
 
 def get_light_properties(
@@ -117,23 +181,35 @@ def get_light_properties(
     """
     Reads a light actor's intensity and color straight off the component, plus
     whether that component exposes a temperature control at all.
+
+    A missing actor, or an actor with no light component, comes back as
+    {"success": False, ...} naming the problem.
     """
     security.enforce_tier("get_light_properties")
     actor_expr = _resolve(actor_name, default_class)
-    component = actor_component(actor_expr, "LightComponentBase")
-    expr = json_dumps(
-        seq(
-            repr(actor_name),
-            f"(lambda c: {{'intensity': c.get_editor_property('intensity'), "
-            f"'color': [c.get_editor_property('light_color').r, "
-            f"c.get_editor_property('light_color').g, "
-            f"c.get_editor_property('light_color').b], "
-            f"'has_temperature': hasattr(c, 'use_temperature'), "
-            f"'temperature': c.get_editor_property('temperature') "
-            f"if hasattr(c, 'use_temperature') else None}}) ({component})",
-        )
+    inner = (
+        "lc = c.get_editor_property('light_color')\n"
+        "has_temp = hasattr(c, 'use_temperature')\n"
+        + _out({
+            "found": "True",
+            "error": "None",
+            "actor_name": "a.get_name()",
+            "intensity": "c.get_editor_property('intensity')",
+            "color": "[lc.r, lc.g, lc.b]",
+            "has_temperature": "has_temp",
+            "temperature": "c.get_editor_property('temperature') if has_temp else None",
+        })
     )
-    return {"success": True, "actor_name": actor_name, **get_bridge().run_python(expr)}
+    body = _body(actor_expr, actor_name, default_class, "LightComponentBase", inner)
+    payload = get_bridge().run_python(guarded(body))
+    if not payload.get("found"):
+        return _fail(actor_name, payload, "could not read light properties")
+    return {"success": True,
+            "actor_name": payload.get("actor_name"),
+            "intensity": payload.get("intensity"),
+            "color": payload.get("color"),
+            "has_temperature": payload.get("has_temperature"),
+            "temperature": payload.get("temperature")}
 
 
 def set_exponential_fog_params(
@@ -150,8 +226,6 @@ def set_exponential_fog_params(
     fog contribution entirely, 1 is fully opaque at distance.
     """
     security.enforce_tier("set_exponential_fog_params")
-    actor_expr = _resolve(actor_name, "ExponentialHeightFog")
-    component = actor_component(actor_expr, "ExponentialHeightFogComponent")
 
     parts: list[str] = []
     if fog_density is not None:
@@ -172,33 +246,51 @@ def set_exponential_fog_params(
             "error": "Nothing to do: pass at least one fog parameter.",
         }
 
-    expr = json_dumps(seq(_apply_to_component(component, parts), repr(actor_name)))
-    result = get_bridge().run_python(expr)
-    return {
-        "success": True,
-        "actor_name": result,
-        "fog_density": fog_density,
-        "fog_height_falloff": fog_height_falloff,
-        "volumetric_fog": volumetric_fog,
-        "fog_max_opacity": fog_max_opacity,
-    }
+    actor_expr = _resolve(actor_name, "ExponentialHeightFog")
+    component = actor_component(actor_expr, "ExponentialHeightFogComponent")
+    inner = (
+        _apply_to_component(component, parts)
+        + "\n"
+        + _out({"found": "True", "error": "None", "actor_name": "a.get_name()"})
+    )
+    payload = get_bridge().run_python(guarded(
+        _body(actor_expr, actor_name, "ExponentialHeightFog",
+              "ExponentialHeightFogComponent", inner)
+    ))
+    if not payload.get("found"):
+        return _fail(actor_name, payload, "could not set fog parameters")
+    return _ok(payload,
+               fog_density=fog_density,
+               fog_height_falloff=fog_height_falloff,
+               volumetric_fog=volumetric_fog,
+               fog_max_opacity=fog_max_opacity)
 
 
 def get_exponential_fog_params(actor_name: str | None = None) -> dict:
     """Reads the height-fog component's current parameters."""
     security.enforce_tier("get_exponential_fog_params")
     actor_expr = _resolve(actor_name, "ExponentialHeightFog")
-    component = actor_component(actor_expr, "ExponentialHeightFogComponent")
-    expr = json_dumps(
-        seq(
-            repr(actor_name),
-            f"(lambda c: {{'fog_density': c.get_editor_property('fog_density'), "
-            f"'fog_height_falloff': c.get_editor_property('fog_height_falloff'), "
-            f"'volumetric_fog': c.get_editor_property('enable_volumetric_fog'), "
-            f"'fog_max_opacity': c.get_editor_property('fog_max_opacity')}}) ({component})",
-        )
-    )
-    return {"success": True, **get_bridge().run_python(expr)}
+    inner = _out({
+        "found": "True",
+        "error": "None",
+        "actor_name": "a.get_name()",
+        "fog_density": "c.get_editor_property('fog_density')",
+        "fog_height_falloff": "c.get_editor_property('fog_height_falloff')",
+        "volumetric_fog": "c.get_editor_property('enable_volumetric_fog')",
+        "fog_max_opacity": "c.get_editor_property('fog_max_opacity')",
+    })
+    payload = get_bridge().run_python(guarded(
+        _body(actor_expr, actor_name, "ExponentialHeightFog",
+              "ExponentialHeightFogComponent", inner)
+    ))
+    if not payload.get("found"):
+        return _fail(actor_name, payload, "could not read fog parameters")
+    return {"success": True,
+            "actor_name": payload.get("actor_name"),
+            "fog_density": payload.get("fog_density"),
+            "fog_height_falloff": payload.get("fog_height_falloff"),
+            "volumetric_fog": payload.get("volumetric_fog"),
+            "fog_max_opacity": payload.get("fog_max_opacity")}
 
 
 def set_sky_atmosphere_params(
@@ -214,8 +306,6 @@ def set_sky_atmosphere_params(
     different color classes.
     """
     security.enforce_tier("set_sky_atmosphere_params")
-    actor_expr = _resolve(actor_name, "SkyAtmosphere")
-    component = actor_component(actor_expr, "SkyAtmosphereComponent")
 
     parts: list[str] = []
     if atmosphere_height is not None:
@@ -240,32 +330,47 @@ def set_sky_atmosphere_params(
             "error": "Nothing to do: pass at least one atmosphere parameter.",
         }
 
-    expr = json_dumps(seq(_apply_to_component(component, parts), repr(actor_name)))
-    result = get_bridge().run_python(expr)
-    return {
-        "success": True,
-        "actor_name": result,
-        "atmosphere_height": atmosphere_height,
-        "ground_albedo": ground_albedo,
-        "rayleigh_scattering": rayleigh_scattering,
-    }
+    actor_expr = _resolve(actor_name, "SkyAtmosphere")
+    component = actor_component(actor_expr, "SkyAtmosphereComponent")
+    inner = (
+        _apply_to_component(component, parts)
+        + "\n"
+        + _out({"found": "True", "error": "None", "actor_name": "a.get_name()"})
+    )
+    payload = get_bridge().run_python(guarded(
+        _body(actor_expr, actor_name, "SkyAtmosphere", "SkyAtmosphereComponent", inner)
+    ))
+    if not payload.get("found"):
+        return _fail(actor_name, payload, "could not set atmosphere parameters")
+    return _ok(payload,
+               atmosphere_height=atmosphere_height,
+               ground_albedo=ground_albedo,
+               rayleigh_scattering=rayleigh_scattering)
 
 
 def get_sky_atmosphere_params(actor_name: str | None = None) -> dict:
     """Reads the SkyAtmosphere component's current parameters, channels by name."""
     security.enforce_tier("get_sky_atmosphere_params")
     actor_expr = _resolve(actor_name, "SkyAtmosphere")
-    component = actor_component(actor_expr, "SkyAtmosphereComponent")
-    expr = json_dumps(
-        seq(
-            repr(actor_name),
-            f"(lambda c: {{'atmosphere_height': c.get_editor_property('atmosphere_height'), "
-            f"'ground_albedo': [c.get_editor_property('ground_albedo').r, "
-            f"c.get_editor_property('ground_albedo').g, "
-            f"c.get_editor_property('ground_albedo').b], "
-            f"'rayleigh_scattering': [c.get_editor_property('rayleigh_scattering').r, "
-            f"c.get_editor_property('rayleigh_scattering').g, "
-            f"c.get_editor_property('rayleigh_scattering').b]}}) ({component})",
-        )
+    inner = (
+        "ga = c.get_editor_property('ground_albedo')\n"
+        "rs = c.get_editor_property('rayleigh_scattering')\n"
+        + _out({
+            "found": "True",
+            "error": "None",
+            "actor_name": "a.get_name()",
+            "atmosphere_height": "c.get_editor_property('atmosphere_height')",
+            "ground_albedo": "[ga.r, ga.g, ga.b]",
+            "rayleigh_scattering": "[rs.r, rs.g, rs.b]",
+        })
     )
-    return {"success": True, **get_bridge().run_python(expr)}
+    payload = get_bridge().run_python(guarded(
+        _body(actor_expr, actor_name, "SkyAtmosphere", "SkyAtmosphereComponent", inner)
+    ))
+    if not payload.get("found"):
+        return _fail(actor_name, payload, "could not read atmosphere parameters")
+    return {"success": True,
+            "actor_name": payload.get("actor_name"),
+            "atmosphere_height": payload.get("atmosphere_height"),
+            "ground_albedo": payload.get("ground_albedo"),
+            "rayleigh_scattering": payload.get("rayleigh_scattering")}

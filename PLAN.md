@@ -893,3 +893,24 @@ object path, so the node-level helpers in `BlueprintEditorLibrary` are
 unreachable. Node reading still needs the C++ escape hatch. The tools say so
 explicitly (`nodes_readable: False`) rather than implying coverage they do not
 have.
+
+### Whole-surface snippet audit, and two bugs it led to (verified)
+
+`tests/test_all_tool_snippets.py` walks server.py's registrations and
+compile-checks the snippet every tool hands to the bridge, with `run_python` and
+`run_raw` stubbed so nothing reaches the editor. 86 tools, 155 snippets, 0
+failures. This closes the gap where the earlier audit skipped 18 tools because its
+dummy-argument table did not cover their parameters; a tool with an unmapped
+argument now fails the suite instead of being silently skipped.
+
+Re-verifying lighting and presets live (73/73 checks) found two real bugs:
+
+- All six lighting tools sent bare `json_dumps` snippets with no `guarded()`
+  wrapper and a non-optional actor lookup, so a missing actor raised StopIteration
+  in the editor and came back as `RemoteCommandFailedError: Remote command failed:
+  []` with an empty log. They now return a structured error. Regression test added.
+- `apply_material_variant_set` reported `{"success": True, "count": 1,
+  "instance_paths": [None]}` for a base material that does not exist, creating
+  nothing. It now validates the base and reports failed variants by name.
+
+Both bugs passed the existing tests because the tests asserted the buggy shape.
