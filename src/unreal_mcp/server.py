@@ -12,6 +12,7 @@ from mcp.server.mcpserver import MCPServer
 from .security import SecurityViolation
 from .tools import (
     data_tables,
+    replication,
     animation,
     assets,
     blueprints,
@@ -187,6 +188,11 @@ mcp.add_tool(_wrap(data_tables.create_data_table))
 mcp.add_tool(_wrap(data_tables.get_data_table_info))
 mcp.add_tool(_wrap(data_tables.list_data_table_rows))
 mcp.add_tool(_wrap(data_tables.export_data_table))
+
+# Replication flags (per-actor and per-component; Replication Graph is not
+# reachable from Python, see the module docstring)
+mcp.add_tool(_wrap(replication.get_replication_state))
+mcp.add_tool(_wrap(replication.set_replication_flags))
 
 # Lighting
 mcp.add_tool(_wrap(lighting.set_light_properties))

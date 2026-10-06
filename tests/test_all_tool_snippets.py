@@ -124,6 +124,9 @@ DUMMY = {
 # hazard: it reaches tools the entry was never written for.
 PER_TOOL = {
     "list_data_table_rows": {"offset": 0, "limit": 2},
+    # Every replication flag is optional and defaults to None, which this tool
+    # treats as a no-op, so the audit has to ask for one explicitly.
+    "set_replication_flags": {"replicates": True},
 }
 
 # A payload shaped like a real editor reply. Tools read specific keys out of it

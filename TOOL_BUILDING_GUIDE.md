@@ -1012,3 +1012,100 @@ also offers optional ones by name. Adding `"offset": 0` for
 snippet, so the tool stopped being covered at all and the only symptom was an
 unrelated test failing. Arguments whose names are reused across tools with
 different types now live in a per-tool table instead of the shared one.
+
+---
+
+## Deadlock triage, and the registry of what is known unsafe
+
+Given how expensive a wrong guess is (an editor restart, and every verification
+run in flight lost), the method is to triage in ascending order of what each stage
+can cost.
+
+**Stage 1, introspection. Free.** Enumerate with `dir()` and classify by name and
+docstring. Unreal's naming is a decent signal: `import_*`, `*_factory_create_file`,
+`fill_*`, `reimport*`, `request_*`, `regenerate*`, anything documented as
+reimporting or recompiling. This costs nothing and narrows the field.
+
+**Stage 2, off-thread probe. Survivable for the risky class.** Run the candidate on
+a worker thread *inside* the editor and leave the game thread free, so the HTTP
+handler always answers and the editor survives whatever the worker does. Outcomes:
+an immediate `Attempted to access Unreal API from outside the main game thread`
+means the call is game-thread-affine (safe to conclude, it was rejected, not
+blocked); a clean return means it is not thread-affine; a worker still running
+after the join means it blocks under any thread.
+
+**Stage 3, game-thread probe. Only if 1 and 2 came back clean.** One call, nothing
+else in the snippet, short client timeout. Then distinguish *slow* from *deadlock*
+by polling liveness every 2s for ~20s afterwards: a slow call recovers (a material
+domain change recompiling shaders does exactly this), a deadlock never does and
+the port stays LISTENed at high CPU.
+
+**Record every result.** A known-deadlocking call must never be retried. I lost an
+editor session to a call I had *already* measured and not written down.
+
+### What Stage 1 says about the four unbuilt categories
+
+Measured by introspection only, no calls made:
+
+- **Landscape and foliage.** `Landscape` and `LandscapeProxy` expose only Actor
+  boilerplate plus `landscape_import_heightmap_from_render_target`.
+  `LandscapeSubsystem`, `LandscapeEditorObject`, `LandscapeInfo` and
+  `LandscapeLayerTypeEnum` are all **absent**. So heightmap sculpting and layer
+  painting are not reachable; foliage is, via
+  `InstancedFoliageActor.add_instances`. Landscape is largely a dead end through
+  Python and only worth pursuing with the C++ escape hatch.
+- **Niagara.** `NiagaraFunctionLibrary` has
+  `create_niagara_parameter_collection_instance` and a set of data-interface
+  setters; `NiagaraComponent` has forces, impulses and overrides.
+  `NiagaraSystem` and `NiagaraEmitter` are bare UObjects with only property
+  accessors. Instance-level control is plausible; emitter graph editing is not.
+- **Multiplayer.** `ReplicationGraphBase` and `ReplicationDriverBase` are both
+  **absent**, so graph-based replication cannot be configured here at all. The
+  per-actor and per-component flag level is buildable, and is built.
+- **Sequencer** (not on the list, but adjacent and promising): `LevelSequence` and
+  `MovieSceneSequence` expose `add_track`, `add_possessable`,
+  `add_spawnable_from_class` and `remove_track`, so keyframing may be more
+  reachable than expected. Untested.
+
+### A correction worth recording: I nearly shipped a fabricated limitation
+
+While building the replication tools I concluded that component-level replication
+"does not persist", and wrote it into the module docstring, the tool's return
+values, and a verification assertion. It was wrong. The probe that "showed" it
+reverting selected its actor by class name and read back the *first* actor of that
+class in the level, which was not the actor it had set the flag on. Component
+replication persists perfectly well.
+
+Three things went wrong at once, all worth naming because the first two are the
+kind that survive review:
+
+- The probe was ambiguous, and I did not notice.
+- I wrote the conclusion into prose and tests before re-testing it, which made the
+  wrong answer feel established and harder to revisit.
+- The test then *asserted* the falsehood, so it would have defended itself forever.
+
+The lesson is narrower than "test more": **do not write a limitation into a
+docstring and a return field until it has been demonstrated twice, by two
+different probes.** Everything here that reports a limitation should be reproducible
+by a reader in a few lines. `data_tables` gets away with `rows_writable_from_bridge:
+False` because the verification script re-derives the deadlock against the live
+editor rather than trusting the constant.
+
+### Replication API facts, all measured
+
+- **Neither `bReplicates` nor `bReplicateMovement` can be set with
+  `set_editor_property`** on an instance: both raise "cannot be edited on
+  instances". Use `actor.set_replicates(bool)` and
+  `actor.set_replicate_movement(bool)`. Both persist.
+- **`net_dormancy` likewise**: `set_editor_property` appears to succeed but does not
+  persist. `actor.set_net_dormancy(NetDormancy.X)` does persist.
+- **A component's flag is `component.replicates` to read, but
+  `component.set_is_replicated(bool)` to write.** There is no `is_replicated`
+  property at all; reading the attribute or asking for the property both raise
+  "Failed to find property 'is_replicated'". C++ calls it `bReplicates`, which
+  makes `is_replicated` the natural wrong guess.
+- **The NetDormancy enum is all-caps with underscores**: `DORM_AWAKE`,
+  `DORM_DORMANT_ALL`, `DORM_DORMANT_PARTIAL`, `DORM_INITIAL`, `DORM_NEVER`. The
+  CamelCase `DORM_Awake` looks right and raises AttributeError. This is the third
+  time in this project a hardcoded enum list derived from the C++ header has been
+  wrong; validate against the live enum instead, as the texture tools do.

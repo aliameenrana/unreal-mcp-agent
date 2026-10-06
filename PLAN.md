@@ -939,3 +939,21 @@ This closes the Data Tables category only in its read-only form. Landscape and
 foliage, Niagara, multiplayer and the remaining presets are still unbuilt, and
 each involves asset creation or world mutation, which is the class of operation
 that just proved capable of wedging the editor.
+
+### Multiplayer: replication flags (verified)
+
+Two tools live-verified, 42/42 checks: `get_replication_state`,
+`set_replication_flags`. Plus 9 offline unit tests.
+
+Covers the per-actor flags (`replicates`, `replicate_movement`, `net_dormancy`)
+and per-component replication. **Replication Graph is not buildable:**
+`ReplicationGraphBase` and `ReplicationDriverBase` are both absent from the Python
+API, so connection filters, priority and dormancy policy cannot be configured from
+here at all.
+
+Every one of these writes needs a dedicated method rather than
+`set_editor_property`: the actor flags raise "cannot be edited on instances", and
+`net_dormancy` silently does not persist. A component reads `replicates` but writes
+via `set_is_replicated()`, and there is no `is_replicated` property. The return
+carries before and after read back from the actor, so it is evidence rather than a
+restatement of the arguments.
