@@ -1155,3 +1155,47 @@ editor rather than trusting the constant.
   CamelCase `DORM_Awake` looks right and raises AttributeError. This is the third
   time in this project a hardcoded enum list derived from the C++ header has been
   wrong; validate against the live enum instead, as the texture tools do.
+
+---
+
+## Foliage: the read side is reachable, creating a FoliageType is not (measured)
+
+Foliage is buildable, with one specific hole that is worth knowing before anyone
+plans around it. Measured against the live editor, not inferred.
+
+**Reachable:**
+- `InstancedFoliageActor.add_instances(world_context_object, foliage_type,
+  transforms)` is exposed and callable.
+- `FoliageStatistics.foliage_overlapping_box_count` and
+  `foliage_overlapping_box_transforms` are exposed for queries.
+- `ProceduralFoliageEditorLibrary` has
+  `resimulate_procedural_foliage_components`,
+  `resimulate_procedural_foliage_volumes`,
+  `clear_procedural_foliage_components` and
+  `clear_procedural_foliage_volumes`.
+- `FoliageType`, `FoliageType_Actor`, `FoliageType_InstancedStaticMesh`,
+  `InteractiveFoliageActor` and `ProceduralFoliageActor` are all live.
+
+**Not reachable: creating the FoliageType asset a foliage actor needs.**
+`add_instances` requires a `FoliageType`, and none can be made from Python:
+
+- `unreal.new_object(unreal.FoliageType, ...)` raises "Class 'FoliageType' is
+  abstract". It is the abstract base; the concrete subclass is
+  `FoliageType_InstancedStaticMesh`.
+- `FoliageType_InstancedStaticMeshFactory` has **no `static_mesh` setter**. Its
+  only writable attributes are the inherited `asset_import_task`,
+  `automated_import_data`, `formats`, `supported_class`, `text` and friends, and
+  its only methods are `script_factory_can_import` and
+  `script_factory_create_file`. It is a *file* import factory for `.ff` foliage
+  type descriptions, not an in-project creator.
+
+So `add_instances` is callable but untestable, because the argument cannot be
+produced. The route that remains is to write a valid `.ff` file to disk and import
+it through `script_factory_create_file`. That is the next thing to try, and it is
+the only thing standing between the current state and a working
+`add_foliage_instances` tool.
+
+Note the asymmetry with Data Tables, where the *write* was blocked and reading
+was fine. Here the *setup* is blocked: the asset creation, not the mutation. Worth
+keeping the two apart, because the workaround differs, one needs C++ and the other
+needs a file format.

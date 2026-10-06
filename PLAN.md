@@ -973,3 +973,15 @@ unavailable: the stub contains exactly one Replication class, `ReplicationSystem
 Foliage, Niagara and Sequencer are all buildable and remain unbuilt. Sequencer
 looks the most promising, with 175 track and section classes live. Recorded in
 TOOL_BUILDING_GUIDE.md so the guessed-name method is not repeated.
+
+### Foliage: reachable, except the FoliageType asset (not yet built)
+
+Foliage instance adding is buildable in principle and blocked in one specific
+place: `add_instances` needs a `FoliageType`, and no FoliageType asset can be
+created from Python. `FoliageType` is abstract so `new_object` refuses it, and
+`FoliageType_InstancedStaticMeshFactory` is a `.ff` file import factory with no
+`static_mesh` setter. Importing a written `.ff` file is the remaining route.
+
+Everything else in foliage is live-verified-ready: `add_instances` itself,
+`FoliageStatistics` for box queries, and `ProceduralFoliageEditorLibrary` for
+resimulate and clear. Unbuilt, and not yet reachable to test end to end.
