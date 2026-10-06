@@ -1199,3 +1199,48 @@ Note the asymmetry with Data Tables, where the *write* was blocked and reading
 was fine. Here the *setup* is blocked: the asset creation, not the mutation. Worth
 keeping the two apart, because the workaround differs, one needs C++ and the other
 needs a file format.
+
+---
+
+## Sequencer: the API is there, but add_possessable is not reliable yet
+
+Sequencer has the largest untouched surface: 21 `LevelSequence` classes and 317
+`MovieScene` classes live, 175 of them tracks and sections. Measured, not guessed:
+
+- `LevelSequenceFactoryNew()` creates a sequence asset. `create_asset` with it
+  works and is immediate.
+- `LevelSequence.add_track(track_class)` works and takes a UMovieSceneTrack class.
+  A new track has no sections; `track.add_section()` then
+  `section.set_range(start, end)` puts a key in, and both read back correctly
+  through `get_sections()`.
+- `LevelSequence.get_bindings()`, `get_tracks()`, `get_possessables()`,
+  `get_spawnables()`, `find_binding_by_name()` and the range accessors all work.
+- **Binding GUIDs are not introspectable.** A `MovieSceneBindingID` renders as
+  `<Struct 'Guid' (0x...) {}>` and its `to_dict()` is empty. Bindings have to be
+  identified by `get_display_name()`, which works.
+- `add_possessable(actor)` and `add_spawnable_from_class(cls)` are the entry
+  points for bindings, and **neither is reliable.** `add_possessable` worked on a
+  fresh sequence several times, then began failing consistently with an empty
+  ReturnValue and an empty log, i.e.
+  `RemoteCommandFailedError: Remote command failed: []`, with no exception and no
+  message. It was reproducible through both `load_asset` and `load_object`, before
+  and after an explicit `save_asset`, so it is not a stale-asset or save-ordering
+  problem. Something about repeated create/delete of sequences appears to leave
+  the editor unable to bind.
+
+That failure mode is the interesting part. It is indistinguishable from a deadlock
+at the call site: an empty log and no ReturnValue, which is what a genuinely
+wedged editor also looks like. The difference is that here the editor stays
+responsive and later calls work.
+
+**No Sequencer tools were committed.** Five were drafted (`create_level_sequence`,
+`get_sequence_info`, `add_sequence_binding`, `add_sequence_track`,
+`add_sequence_key`) and the three that do not touch bindings all behaved, but
+nothing in the set could be verified end to end, and this repository's standard is
+that a tool ships only once a live run has passed. A partially working binding
+tool that silently fails on half its calls is worse than no tool.
+
+To resume: verify `add_possessable` against a *single* long-lived sequence, with
+no create/delete churn, and find what makes it fail. If it cannot be made
+reliable, `create_level_sequence`, `get_sequence_info`, `add_sequence_track` and
+`add_sequence_key` are all independently shippable and do not depend on it.

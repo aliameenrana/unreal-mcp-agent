@@ -985,3 +985,20 @@ created from Python. `FoliageType` is abstract so `new_object` refuses it, and
 Everything else in foliage is live-verified-ready: `add_instances` itself,
 `FoliageStatistics` for box queries, and `ProceduralFoliageEditorLibrary` for
 resimulate and clear. Unbuilt, and not yet reachable to test end to end.
+
+### Sequencer: drafted, deliberately not committed (binding writes unreliable)
+
+Five tools were written for Level Sequences and then reverted rather than
+committed. `create_level_sequence`, `add_sequence_track` and `add_sequence_key`
+all behaved in isolation, and `get_sequence_info` could not be reached because
+verification stops at the first binding.
+
+The blocker is `add_possessable`, which works sometimes and then fails
+consistently with `RemoteCommandFailedError: Remote command failed: []` — empty
+log, no exception — reproducibly across `load_asset` and `load_object`, before and
+after `save_asset`. That is the same surface signature as a deadlocked editor,
+which is worth remembering when triaging.
+
+Shipping four of five tools while the fifth silently fails on half its calls would
+be worse than shipping none, so the code was reverted and only these findings were
+kept. Details and a suggested next step are in TOOL_BUILDING_GUIDE.md.
