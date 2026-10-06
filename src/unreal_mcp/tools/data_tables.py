@@ -85,6 +85,12 @@ def create_data_table(package_path: str, table_name: str,
     package = f"{package_path.rstrip('/')}/{table_name}"
     object_path = f"{package}.{table_name}"
 
+    # 'None', False are calling_context and bInteractive. bInteractive must be
+    # False explicitly: create_asset defaults it to True and pops an overwrite
+    # dialog, which blocks the Remote Control endpoint until a human clicks it,
+    # so the caller sees a timeout rather than a question. The does_asset_exist
+    # check above is not a substitute, because delete_asset is asynchronous and
+    # can report a deletion that has not landed on disk yet.
     script = (
         f"pkg = {package!r}\n"
         f"struct_path = {row_struct_class!r}\n"
@@ -101,7 +107,8 @@ def create_data_table(package_path: str, table_name: str,
         f"        fac = {UNREAL}.DataTableFactory()\n"
         f"        fac.struct = ss\n"
         f"        dt = {UNREAL}.AssetToolsHelpers.get_asset_tools().create_asset(\n"
-        f"            {table_name!r}, {package_path!r}, {UNREAL}.DataTable, fac)\n"
+        f"            {table_name!r}, {package_path!r}, {UNREAL}.DataTable, fac,\n"
+        f"            'None', False)\n"
         f"        if dt is None:\n"
         f"            OUT = {{'found': False,\n"
         f"                  'error': 'the editor created nothing at ' + pkg}}\n"

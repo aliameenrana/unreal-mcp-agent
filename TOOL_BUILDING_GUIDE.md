@@ -1244,3 +1244,50 @@ To resume: verify `add_possessable` against a *single* long-lived sequence, with
 no create/delete churn, and find what makes it fail. If it cannot be made
 reliable, `create_level_sequence`, `get_sequence_info`, `add_sequence_track` and
 `add_sequence_key` are all independently shippable and do not depend on it.
+
+---
+
+## add_possessable hard-hangs the editor. Never call it.
+
+The earlier note on this page said `add_possessable` was "unreliable" and
+sometimes returned an empty log. That was wrong, and the difference matters:
+it is not flaky, it **deadlocks the editor's game thread.**
+
+The evidence, in order:
+
+1. `RemoteCommandFailedError: Remote command failed: []` — no ReturnValue, no
+   log, no exception. Not a deadlocked-*looking* call.
+2. `seq.add_track(...)` and `track.add_section()` + `section.set_range(...)` on a
+   sequence **loaded from disk** both succeed. So the sequence object, the asset
+   on disk, and the editor session are all healthy.
+3. A call combining `add_possessable` with anything else ran past a 300 s timeout.
+4. Immediately afterwards the editor answered no RPC *and* System Events
+   returned no window list, while `ps` showed ~46% CPU. It was spinning, not
+   idle and not waiting on a dialog.
+
+So the earlier "empty log" results were a partially wedged editor recovering
+sometimes, not an intermittent API. Nothing about the call pattern matters:
+`LevelSequence.add_possessable`, `MovieSceneSequenceExtensions.add_possessable`
+and `LevelSequenceEditorSubsystem.add_spawnable_from_class` all fail the same
+way, on freshly created and on freshly loaded sequences, with and without an
+intervening `save_asset`.
+
+**Never call `add_possessable` or `add_spawnable_from_*` from this bridge.** There
+is no safe timeout, no retry and no workaround; the only recovery is restarting
+the editor. Any binding tool has to be built on something else or not at all.
+
+What is genuinely usable, measured on a loaded sequence: `get_bindings()`,
+`get_tracks()`, `get_possessables()`, `get_spawnables()`, `find_binding_by_name()`,
+`add_track()`, `add_section()`, `set_range()`. So tracks and keyframes can be
+built, but there is no way to attach them to an object, which is most of what a
+sequencer tool is for.
+
+### create_asset must pass bInteractive=False
+
+`AssetTools.create_asset` defaults `bInteractive` to True and pops an overwrite
+dialog. Under Remote Control that dialog blocks the endpoint until a human
+clicks it, so an automated call sees a timeout instead of a question. Pass
+`bInteractive=False` (6th argument, after `'None'` for calling_context) on **every**
+call site, and keep the `does_asset_exist` pre-check as well: `delete_asset` is
+asynchronous and can report a deletion that has not landed on disk, so the
+pre-check alone is not sufficient. `create_data_table` was missing the flag.
