@@ -957,3 +957,19 @@ Every one of these writes needs a dedicated method rather than
 via `set_is_replicated()`, and there is no `is_replicated` property. The return
 carries before and after read back from the actor, so it is evidence rather than a
 restatement of the arguments.
+
+### Corrected survey: two earlier "not possible" verdicts were wrong
+
+The first pass over the unbuilt categories guessed class names instead of
+surveying the API, and concluded foliage and Niagara were largely unreachable.
+That was wrong: `ProceduralFoliageEditorLibrary`, `FoliageStatistics`,
+`InstancedFoliageActor.add_instances` and 334 Niagara classes are all live.
+
+Only two verdicts survive a proper survey. **Landscape editing** is genuinely
+unavailable: all 44 Landscape classes are live but none exposes a Subsystem,
+Library, Editor or Utils entry point. **Replication Graph** is genuinely
+unavailable: the stub contains exactly one Replication class, `ReplicationSystem`.
+
+Foliage, Niagara and Sequencer are all buildable and remain unbuilt. Sequencer
+looks the most promising, with 175 track and section classes live. Recorded in
+TOOL_BUILDING_GUIDE.md so the guessed-name method is not repeated.

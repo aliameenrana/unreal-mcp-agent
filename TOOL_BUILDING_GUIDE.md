@@ -1043,29 +1043,75 @@ the port stays LISTENed at high CPU.
 **Record every result.** A known-deadlocking call must never be retried. I lost an
 editor session to a call I had *already* measured and not written down.
 
-### What Stage 1 says about the four unbuilt categories
+### Surveying the API surface: enumerate, never guess a class list
 
-Measured by introspection only, no calls made:
+My first pass at the unbuilt categories was wrong in method, and worth recording
+because it nearly produced false "not possible" verdicts.
 
-- **Landscape and foliage.** `Landscape` and `LandscapeProxy` expose only Actor
-  boilerplate plus `landscape_import_heightmap_from_render_target`.
-  `LandscapeSubsystem`, `LandscapeEditorObject`, `LandscapeInfo` and
-  `LandscapeLayerTypeEnum` are all **absent**. So heightmap sculpting and layer
-  painting are not reachable; foliage is, via
-  `InstancedFoliageActor.add_instances`. Landscape is largely a dead end through
-  Python and only worth pursuing with the C++ escape hatch.
-- **Niagara.** `NiagaraFunctionLibrary` has
-  `create_niagara_parameter_collection_instance` and a set of data-interface
-  setters; `NiagaraComponent` has forces, impulses and overrides.
-  `NiagaraSystem` and `NiagaraEmitter` are bare UObjects with only property
-  accessors. Instance-level control is plausible; emitter graph editing is not.
-- **Multiplayer.** `ReplicationGraphBase` and `ReplicationDriverBase` are both
-  **absent**, so graph-based replication cannot be configured here at all. The
-  per-actor and per-component flag level is buildable, and is built.
-- **Sequencer** (not on the list, but adjacent and promising): `LevelSequence` and
-  `MovieSceneSequence` expose `add_track`, `add_possessable`,
-  `add_spawnable_from_class` and `remove_track`, so keyframing may be more
-  reachable than expected. Untested.
+I guessed roughly twenty plausible class names per category, looked each one up,
+and called the category "dead" when they came back `ABSENT`. Concretely: I
+concluded foliage and landscape were unreachable without ever checking
+`ProceduralFoliageEditorLibrary` or `FoliageStatistics`, which both exist and do
+exactly the job I said was impossible.
+
+This is the same failure as hardcoding an enum list from the C++ header, and the
+same failure as guessing a property name: **a name you invented is a hypothesis,
+not a survey.** Every time in this project a curated list of names has been
+wrong, it has been wrong in the same direction, towards concluding something is
+unavailable.
+
+The survey is cheap and complete, so there is no excuse for the guess. Compare a
+prefix count against the stub, which lists everything the engine can expose:
+
+    grep -c "^class Landscape" UnrealProject/Intermediate/PythonStub/unreal.py   # 44
+    grep -c "^class Niagara"   UnrealProject/Intermediate/PythonStub/unreal.py   # 334
+    grep -c "^class MovieScene" UnrealProject/Intermediate/PythonStub/unreal.py  # 317
+    grep -c "^class Replication" UnrealProject/Intermediate/PythonStub/unreal.py # 1
+
+and confirm the same prefixes are actually *live* in the editor with a
+`dir(u)` scan. Those two checks together are the whole survey, and both were free.
+An `ABSENT` from a guessed name means "I did not look", not "it does not exist".
+
+### Corrected survey of the four unbuilt categories
+
+- **Landscape editing: genuinely unavailable, now on real evidence.** All 44
+  Landscape classes are live, but scanning all of them for any Subsystem,
+  Library, Editor, Utils or Settings entry point turns up only
+  `LandscapeGrassTypeFactory`, `LandscapeTargetLayerSettings` and some PCG
+  settings. There is no landscape editing library. `Landscape`,
+  `LandscapeProxy` and `LandscapeComponent` expose Actor and physics boilerplate
+  only. `LandscapeEditLayer` and `LandscapeBlueprintCustomBrush` are data objects
+  with no methods. `LandscapeBrushParameters` is a struct, so its fields are
+  readable and settable via `import_text`, which is the one sliver of reachable
+  landscape API. Sculpting and layer painting need the C++ escape hatch.
+- **Foliage: available, and I had missed it.** `InstancedFoliageActor` with
+  `add_instances`, `FoliageType` and `FoliageType_InstancedStaticMeshFactory` for
+  the type asset, `FoliageType_ActorFactory`, `FoliageStatistics` with
+  `foliage_overlapping_box_count` and
+  `foliage_overlapping_box_transforms`, `InteractiveFoliageActor`,
+  `ProceduralFoliageActor`, and `ProceduralFoliageEditorLibrary` for
+  `resimulate_procedural_foliage_components`,
+  `resimulate_procedural_foliage_volumes` and clearing procedural foliage.
+- **Niagara: available, and far larger than my survey suggested.** 334 live
+  classes including `NiagaraDataChannelLibrary`, `NiagaraBakerFunctionLibrary`,
+  `NiagaraEditorPreviewActor`, `NiagaraEditorDataBase`, and a family of
+  `...FactoryNew` classes (`NiagaraEffectTypeFactoryNew`,
+  `NiagaraDataChannelAssetFactoryNew`). The instance-level surface I did find is
+  real: `NiagaraFunctionLibrary.create_niagara_parameter_collection_instance` plus
+  data-interface setters, and `NiagaraComponent` forces, impulses and overrides.
+  Emitter *graph* editing is still unproven, and is the part most likely to need
+  C++.
+- **Multiplayer: Replication Graph genuinely unavailable.** This one holds, and
+  the reason is now firmer than "I looked at two names": the stub contains
+  **one** Replication-prefixed class, `ReplicationSystem`. There is no
+  `ReplicationGraphBase`, no driver, no node. Per-actor and per-component flags
+  are built and verified.
+- **Sequencer: much larger than I implied.** 21 LevelSequence and 317 MovieScene
+  classes live, 175 of them tracks and sections, including
+  `MovieScene3DTransformTrack` and `MovieScene3DTransformSection` with
+  `add_track`, `add_possessable`, `add_spawnable_from_class` and `remove_track` on
+  `LevelSequence`/`MovieSceneSequence`. Keyframing looks buildable and is the most
+  promising untested category. Untried, so treat that as a lead, not a promise.
 
 ### A correction worth recording: I nearly shipped a fabricated limitation
 
