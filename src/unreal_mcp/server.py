@@ -15,6 +15,7 @@ from .tools import (
     replication,
     animation,
     assets,
+    blueprint_graph,
     blueprints,
     components,
     levels,
@@ -113,6 +114,19 @@ mcp.add_tool(_wrap(blueprints.list_blueprint_functions))
 mcp.add_tool(_wrap(blueprints.list_blueprint_events))
 mcp.add_tool(_wrap(blueprints.list_blueprint_variables))
 mcp.add_tool(_wrap(blueprints.list_blueprint_event_dispatchers))
+mcp.add_tool(_wrap(blueprint_graph.list_blueprint_graph_nodes))
+mcp.add_tool(_wrap(blueprint_graph.list_blueprint_available_nodes))
+mcp.add_tool(_wrap(blueprint_graph.get_blueprint_compile_errors))
+mcp.add_tool(_wrap(blueprint_graph.add_blueprint_event_node))
+mcp.add_tool(_wrap(blueprint_graph.add_blueprint_call_function_node))
+mcp.add_tool(_wrap(blueprint_graph.add_blueprint_variable_node))
+mcp.add_tool(_wrap(blueprint_graph.add_blueprint_branch_node))
+mcp.add_tool(_wrap(blueprint_graph.add_blueprint_comment))
+mcp.add_tool(_wrap(blueprint_graph.add_blueprint_member_variable))
+mcp.add_tool(_wrap(blueprint_graph.create_blueprint_function_graph))
+mcp.add_tool(_wrap(blueprint_graph.set_blueprint_node_position))
+mcp.add_tool(_wrap(blueprint_graph.connect_blueprint_pins))
+mcp.add_tool(_wrap(blueprint_graph.delete_blueprint_nodes))
 
 # Components
 mcp.add_tool(_wrap(components.add_component))

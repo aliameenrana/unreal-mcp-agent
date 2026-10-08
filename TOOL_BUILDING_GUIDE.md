@@ -54,6 +54,633 @@ a viewport.
 
 ---
 
+## Tool inventory: built, planned, and out of scope, in one place
+
+This is the map to read before diving into process detail or any per-domain
+section below. It answers one question per domain: what's already built
+(✅, cross-checked directly against `grep -rn "^def [a-z]" src/unreal_mcp/tools/*.py`,
+125 functions total), what PLAN.md's catalog names but nobody has built yet
+(📋), and what's been confirmed not buildable in pure Python (🚫, with the
+one-line reason and a pointer to the fuller writeup elsewhere in this
+document or in RESEARCH_NEW_DOMAINS.md). Tool names only here — the "how to
+build it" detail lives in the per-domain section the back-reference points
+to, so this table doesn't duplicate it.
+
+**A conflict surfaced while building this table, flagged rather than
+silently resolved:** PLAN.md's prose (the "Materials and textures" section)
+describes `create_material_function` as living alongside the other Material
+*Library* calls, but the actual file is `create_material_function` in
+`tools/material_graph.py` (confirmed by grep) — PLAN.md's prose is
+describing the right API but the wrong file boundary; not a functional bug,
+just a stale cross-reference if anyone goes looking for it by filename.
+Separately, `create_material_function_call` (singular node-insertion,
+distinct from `create_material_function` the asset-scaffolder) lives in
+`tools/textures.py`, not `tools/material_graph.py` — grep is ground truth
+here, trust the file, not PLAN.md's section grouping, if the two disagree
+on where something lives.
+
+### scene.py (actors and scene graph)
+
+✅ `spawn_actor`, `list_actors`, `get_scene_state`, `set_actor_transform`,
+`set_property`, `get_property`, `duplicate_actor`, `delete_actor`,
+`set_mesh_material_slot`, `get_mesh_material_slot`, `attach_actor`,
+`detach_actor`, `set_actor_folder`, `tag_actor`, `find_actors_by_tag`,
+`select_actors`, `get_selected_actors`
+
+📋 `rename_asset`/`move_asset`/`duplicate_asset` (these are catalog-named
+under "Asset management," not scene), generic `set_actor_parent_component`
+(deliberately not built, see PLAN.md's own note), `group_actors`/`ungroup_actors`
+(see 🚫)
+
+🚫 `group_actors` / `ungroup_actors` — stub lists them on
+`EditorActorSubsystem`, live object has neither. See PLAN.md's "Actors and
+scene graph" section for the full finding.
+
+📋 **`set_actor_label(actor_name, new_label)` — ready to build, no ambiguity.**
+Found by RESEARCH_NEW_DOMAINS.md's catalog audit: every other actor-naming
+surface in this project (`tag_actor`, `set_actor_folder`) has both a getter
+and setter; labels only have `get_actor_label()`, read via `list_actors`/
+`get_selected_actors`, with no matching setter anywhere in `scene.py`.
+
+- **Exact call:** `AActor.set_actor_label(new_label, bMarkDirty=True)` —
+  this is the direct Blueprint/Python-exposed counterpart to the already-used
+  `get_actor_label()`, same class, same naming convention (both are plain
+  methods on `Actor`, not `EditorActorSubsystem` calls, matching how
+  `get_actor_label` is already called in `list_actors`).
+- **Source:** `AActor::SetActorLabel` is documented C++/Blueprint API;
+  confirm the Python-exposed signature (arg name/default for the dirty-flag
+  parameter) via `dir(unreal.Actor)` before writing the tool — this project's
+  own step-2a/2b discipline applies here same as anywhere else, this entry
+  being "no ambiguity" means the target call and its purpose are unambiguous,
+  not that the probe step is skippable.
+- **No known gotcha.** Unlike `bHidden`/`hidden` (read-only trap) or
+  `DirectionalLightComponent.intensity` (setattr-rejects, set_editor_property
+  works), nothing in this project's prior research flags actor labels as
+  having a read/write asymmetry at the API level — the asymmetry found here
+  is purely "nobody built the setter tool yet," not an engine-side
+  restriction.
+- **Pattern to follow:** mirror `set_actor_folder`'s existing shape exactly
+  (`find_actor_by_name` → call the setter → read back via `get_actor_label()`
+  independently, not by trusting the setter's return) since it's the closest
+  existing sibling tool for a single-string actor-naming property.
+- **Security tier:** `CONSTRUCTIVE`, same tier as `set_actor_folder`/`tag_actor` — renaming
+  a label is not destructive or irreversible.
+
+📋 **New primitive from RECIPE_DESIGNS.md:** `get_skeletal_mesh_sockets` —
+see "Socket discovery" subsection under Animation below.
+
+### components.py
+
+✅ `add_component`, `remove_component`, `list_components`,
+`set_component_property`
+
+(Built via `unreal.new_object`/`destroy_component`, not the
+`add_component_by_class`/`destroy_component`-on-Actor PLAN.md originally
+guessed — see PLAN.md's "Components" section for the corrected call shapes.)
+
+### materials.py / material_graph.py / textures.py (materials, graph authoring, textures)
+
+✅ Parameters (`materials.py`): `create_material`, `create_material_instance`,
+`set_material_scalar_parameter`, `get_material_parameter_list`,
+`set_material_texture_parameter`, `set_material_vector_parameter`,
+`set_material_domain_and_shading_model`, `import_texture`
+
+✅ Graph authoring (`material_graph.py`, 17 tools): `list_material_expressions`,
+`get_material_inputs`, `get_material_graph_stats`, `get_material_used_textures`,
+`find_material_parameter_usage`, `create_material_expression`,
+`delete_material_expression`, `delete_unused_material_expressions`,
+`layout_material_graph`, `connect_material_expressions`,
+`connect_material_input`, `disconnect_material_input`,
+`set_material_expression_property`, `get_material_expression_property`,
+`recompile_material_graph`, `create_material_parameter`,
+`set_material_static_switch_parameter`
+
+✅ Material functions (`material_graph.py`, 9 tools): `create_material_function`,
+`list_material_function_expressions`, `create_material_function_expression`,
+`delete_material_function_expression`, `layout_material_function`,
+`delete_all_material_function_expressions`,
+`connect_material_function_expressions`,
+`set_material_function_expression_property`,
+`get_material_function_expression_property`
+
+✅ Textures (`textures.py`): `generate_texture_from_pixels`,
+`set_texture_properties`, `get_texture_info`, `create_material_function_call`
+
+🚫 Material-to-texture baking (`render_material_to_texture` / `bake_material_to_texture`)
+— `KismetRenderingLibrary` is absent, `CanvasRenderTarget2D` exposes no usable
+draw call. See "Texture2D" section below.
+
+📋 `create_render_target` — same blocker as above.
+
+### components-adjacent: meshes.py
+
+✅ `get_mesh_bounds`, `set_mesh_lods`, `get_mesh_collision_info`,
+`set_mesh_collision_preset`, `import_static_mesh`, `import_skeletal_mesh`
+
+📋 `generate_lods` as originally named — not buildable as named; built
+instead as `set_mesh_lods`, see "Meshes and geometry" in PLAN.md.
+📋 `set_collision_complexity` as originally named — not buildable as named;
+built instead as `get_mesh_collision_info`/`set_mesh_collision_preset`.
+
+### lighting.py
+
+✅ `set_light_properties`, `get_light_properties`,
+`set_exponential_fog_params`, `get_exponential_fog_params`,
+`set_sky_atmosphere_params`, `get_sky_atmosphere_params`
+
+📋 `build_lighting` — lightmass build trigger + completion poll, named in
+PLAN.md, not built.
+
+### levels.py
+
+✅ `list_levels`, `get_current_level`, `save_level`, `load_level`, `new_level`
+
+📋 `stream_level`, `set_world_partition_region_loaded`, `get_level_bounds`
+
+### play.py
+
+✅ `get_play_state`, `start_play_in_editor`, `start_play_in_editor_simulate`,
+`stop_play_in_editor`, `wait_for_play_state`, `execute_console_command`,
+`get_console_variable`
+
+📋 `capture_viewport_screenshot`, `get_output_log`,
+`run_automation_test` (see Automation Tests section below for the newer,
+better-sourced version of this)
+
+### animation.py
+
+✅ `set_animation`, `set_animation_mode`, `play_animation`, `stop_animation`,
+`pause_animation`, `set_play_rate`, `get_animation_state`
+
+📋 `create_animation_blueprint`, `add_anim_state`/`add_anim_transition`,
+`import_animation_sequence`, `set_skeletal_mesh_physics_asset`,
+`retarget_animation`
+
+📋 **Morph Targets** — see dedicated section below.
+📋 **Control Rig** — see dedicated section below.
+📋 **socket discovery (`get_skeletal_mesh_sockets`)** — see dedicated
+subsection below; shared dependency for 4 recipes in RECIPE_DESIGNS.md.
+
+### physics.py
+
+✅ `get_collision_state`, `set_collision_enabled`, `set_collision_profile`,
+`set_collision_object_type`, `set_collision_response`,
+`set_simulate_physics`, `apply_physics_impulse`
+
+📋 `add_physics_constraint`, `create_physical_material`,
+`simulate_physics_step`
+
+### replication.py
+
+✅ `get_replication_state`, `set_replication_flags`
+
+🚫 Replication Graph configuration — `ReplicationGraphBase`/`ReplicationDriverBase`
+absent from the Python API entirely (stub has exactly one `Replication`-prefixed
+class, `ReplicationSystem`). See "Deadlock triage" section's "Corrected
+survey" below.
+
+📋 `set_property_replication`, `add_rep_notify_function`,
+`set_actor_network_relevancy`, `create_game_mode`/`set_default_game_mode`,
+`verify_replication_setup`
+
+### data_tables.py
+
+✅ `create_data_table`, `get_data_table_info`, `list_data_table_rows`,
+`export_data_table` — create/read only, by design.
+
+🚫 Row authoring (`fill_data_table_from_json_string`/CSV twin) — deadlocks
+the editor over Remote Control. See "The game-thread deadlock" section
+below.
+
+📋 `create_struct_asset`/`create_enum_asset`
+
+### blueprints.py
+
+✅ `create_blueprint`, `get_blueprint_info`, `list_blueprint_graphs`,
+`list_blueprint_functions`, `list_blueprint_events`, `list_blueprint_variables`,
+`list_blueprint_event_dispatchers`, `compile_blueprint`
+
+🚫 Node-level reading/writing via `BlueprintEditorLibrary`/raw `EdGraph.Nodes`
+— protected property, nodes not addressable by object path. See "Blueprints:
+structure is readable, node contents are not" below. **Corrected by
+RESEARCH_NEW_DOMAINS.md — see the dedicated "Blueprint graph editing" section
+below, this is the single highest-priority item in this whole document.**
+
+📋 `add_blueprint_variable`, `get_blueprint_compile_errors`,
+`set_blueprint_parent_class`
+
+### assets.py
+
+✅ `asset_exists`, `delete_asset`, `save_asset`
+
+📋 `import_asset` (generic dispatcher), `list_assets_in_path`,
+`rename_asset`/`move_asset`/`duplicate_asset`,
+`get_asset_references`/`get_asset_dependencies`, `fix_up_redirectors`
+
+### presets.py
+
+✅ `light_scene_preset`, `set_dressing_pass`, `apply_material_variant_set`
+
+📋 `build_and_test_pie`, `create_pickup_item`, `setup_basic_multiplayer_actor`,
+`spawn_vfx_with_sound`, `batch_import_asset_folder`, plus the 9 recipes from
+RECIPE_DESIGNS.md and the 4-5 generic-combination recipes — all catalogued
+in PLAN.md's "Presets" section.
+
+### python_exec.py
+
+✅ `execute_python` — the escape hatch, MVP.
+
+### Niagara / VFX — no module yet, all planned
+
+📋 `spawn_niagara_system`, `set_niagara_parameter`,
+`get_niagara_user_parameters`, `create_niagara_system_asset`,
+`add_niagara_emitter_from_template`, `set_niagara_renderer_material` — all
+catalog-only, not built. Instance-level control (spawn/parameterize/assemble)
+is real and buildable; see PLAN.md's Niagara section.
+
+🚫 Niagara module/script graph authoring (node-by-node) — confirmed not
+buildable, see "Niagara Graph-Level Authoring" below.
+
+### Audio — no module yet, all planned
+
+📋 `import_sound_wave`, `create_sound_cue`, `play_sound_at_location` (PIE-only),
+`set_sound_attenuation_settings`
+
+### UMG / UI — no module yet, all planned
+
+📋 `create_widget_blueprint`, `add_widget_to_viewport` (PIE-only),
+`set_widget_text`, `set_widget_visibility` — all three primitives
+`spawn_hud` (RECIPE_DESIGNS.md) depends on; none built, widget-tree
+child-resolution mechanics unconfirmed. See RECIPE_DESIGNS.md's own honesty
+check on `spawn_hud`.
+
+### Landscape and foliage — no module yet
+
+📋 `add_foliage_type`/`paint_foliage_instances` buildable in part — see
+"Foliage: the read side is reachable, creating a FoliageType is not" below.
+
+🚫 `sculpt_landscape_heightmap`/`paint_landscape_layer` — Landscape editing
+genuinely unavailable, no Subsystem/Library/Editor/Utils entry point exists
+anywhere across all 44 live Landscape classes. See "Corrected survey" below.
+
+### Sequencer / cinematics — no module yet
+
+📋 `create_level_sequence`, `add_actor_to_sequence`/`add_camera_cut_track`,
+`add_keyframe`, `render_sequence_to_movie` — tracks/sections/keyframing are
+real and drafted; binding tools are not.
+
+🚫 `add_possessable`/`add_spawnable_from_class` — hard-hangs the editor's
+game thread, confirmed by repeated measurement. Never call. See
+"add_possessable hard-hangs the editor" below.
+
+### MetaHuman — no module yet
+
+📋 Entire domain catalogued in PLAN.md, deliberately deferred until PIE
+screenshot infrastructure exists.
+
+### Control Rig — new domain, no module yet
+
+📋 `unreal.ControlRigBlueprint`/`RigVMController`/`RigHierarchyController` —
+BUILDABLE. See dedicated "Control Rig" section below.
+
+### Automation Tests — new domain, no module yet
+
+📋 `unreal.PythonTestRunner` — BUILDABLE. See dedicated "Automation Tests"
+section below.
+
+### GAS inspection — new domain, no module yet
+
+📋 `get_ability_system_state` (read-only) — PARTIALLY BUILDABLE, narrow
+scope only. See dedicated "GAS (read-only inspection)" section below.
+
+### Blueprint graph editing (`unreal.BlueprintGraphEditor`) — correction, no module yet
+
+📋 **Highest-priority item in this document.** See dedicated section below,
+placed immediately after this inventory for prominence.
+
+### Morph Targets — new domain, no module yet
+
+📋 `unreal.MorphTarget` discovery — PARTIALLY BUILDABLE. See dedicated
+"Morph Targets" section below.
+
+### Confirmed out of scope, no further work planned
+
+🚫 Animation Mixer (Sequencer mixer track authoring) — no Python binding
+found. See "Animation Mixer" section below.
+🚫 Niagara graph-level authoring — see "Niagara Graph-Level Authoring" below.
+🚫 Gizmo control — no Python binding found. See "Gizmo Control" section
+below.
+
+---
+
+## Blueprint graph editing: BUILDABLE. The "needs C++" verdict was wrong.
+
+**This section replaces the earlier "correction" that said the domain was
+unconfirmed. It is now confirmed working, and 13 tools are built and
+live-verified in `src/unreal_mcp/tools/blueprint_graph.py`.**
+
+The long-standing conclusion in both this guide and PLAN.md was that Blueprint
+graph node wiring needs the C++ escape hatch, because `EdGraph.Nodes` is a
+protected property and nodes are not addressable by object path. That reasoning
+was correct *about the `BlueprintEditorLibrary` surface* and wrong about the
+domain: `unreal.BlueprintGraphEditor` is a different class, it exposes a full
+node-authoring API, and the node and pin handles it returns are ordinary Python
+objects. The load-bearing probe, run before writing any tool:
+
+1. `unreal.BlueprintGraphEditor` exists live (11240 symbols in `dir(unreal)`).
+2. `get_graph_editor_by_name(bp, "EventGraph")` returns an editor object.
+3. `list_all_nodes()` returns real `K2Node_*` handles (`K2Node_CustomEvent` in
+   the probe), not opaque references.
+4. `node.list_all_pins()` and `pin.get_pin_type_as_json_schema()` work, so pin
+   identity, direction and type are all readable.
+
+Handle quality was the open question and it is answered yes: the handles support
+`find_execute_pin`, `find_data_input_pin`, `get_node_title`, `get_node_pos`,
+`get_node_size`, `get_node_category` and `error_msg`.
+
+### What is built
+
+`list_blueprint_graph_nodes`, `list_blueprint_available_nodes`,
+`get_blueprint_compile_errors`, `add_blueprint_event_node`,
+`add_blueprint_call_function_node`, `add_blueprint_variable_node`,
+`add_blueprint_branch_node`, `add_blueprint_comment`,
+`add_blueprint_member_variable`, `create_blueprint_function_graph`,
+`set_blueprint_node_position`, `connect_blueprint_pins`,
+`delete_blueprint_nodes`. 20/20 live checks pass.
+
+`list_blueprint_graphs` in `blueprints.py` still reports `nodes_readable: False`,
+and that is now a *deliberate* statement about that tool's own code path rather
+than a claim about the engine. It reads `EdGraph.Nodes`; `blueprint_graph.py`
+uses the working path.
+
+### Traps measured on this API, all of which cost a live probe
+
+- **Three link-related calls wedge the Remote Control request** with an empty
+  log and no ReturnValue: `BlueprintGraphPin.try_create_connection`,
+  `BlueprintGraphPinLibrary.try_create_connection`, and
+  `BlueprintGraphPinLibrary.list_connected_pins`. Wiring goes through
+  `destination_pin.assign(source_pin)`, which works. There is no `is_linked`, so
+  a connection cannot be read back directly at all; `connect_blueprint_pins`
+  verifies by compiling and diffing the error-bearing node titles before and
+  after, which is a different API path entirely.
+- **`BlueprintGraphPin.get_pin_direction` cannot pythonize its return value**
+  (`ByteProperty` -> enum). Pin direction is derived from whether a pin appears
+  in `node.list_input_pins()` instead.
+- **An exec pin's `Name` is null**, so it stringifies as the literal `'None'`
+  and cannot be addressed by name at all. A selector token of `exec` (or
+  `<exec>`) routes to `find_execute_pin()`; this is what makes exec wiring
+  possible.
+- **Node positions are `IntPoint`, not `Vector2D`.** `set_node_pos` rejects a
+  Vector2D and a Vector both, with `Failed to convert parameter 'pos'`. Node
+  *sizes* are a Vector2D. Comment boxes do take a Vector2D position.
+- **`Blueprint.NewVariables` is protected** and raises, so a member variable
+  cannot be read back that way. `BlueprintEditorLibrary.list_member_variable_names`
+  and `add_member_variable` are the working pair. (`get_member_variable_type`
+  is on the same library; a bare `EdGraphPinType()` reads back as an integer
+  regardless of what was requested, so types resolve via
+  `get_basic_type_by_name`.)
+- **`BlueprintEditorSubsystem` does not exist in this build.** The entry point
+  is the static `BlueprintGraphEditor.get_graph_editor_by_name(blueprint,
+  graph_name)`. Separately, `get_graph_editor(graph)` takes the graph alone, not
+  the Blueprint and the graph.
+- **`list_available_nodes` returns about 40,000** pipe-separated
+  `Category|Subcategory|Action` names. The originating class is not in the
+  string, so filtering by a library name such as `KismetSystemLibrary` correctly
+  returns nothing; filter on the action (`PrintString`).
+
+### The generalisable lesson
+
+This is the **fourth** time in this project that a "confirmed absent" verdict
+came from checking one class instead of searching for the sibling that owns the
+function. The earlier three were `generate_lods`, the foliage classes, and the
+Niagara classes. The cost of each was the same: a capability declared impossible
+that was in fact sitting in the API. Step 2's five-step protocol already demanded
+the sibling check and it was still not run for this domain until the domain was
+named as highest priority. Treat any new "not available in Python" claim as
+provisional until a `dir(unreal)` sweep and a sibling-class search have both
+come up empty.
+
+
+---
+
+## Control Rig — BUILDABLE, strong real surface, confirm before building
+
+Source: https://dev.epicgames.com/documentation/unreal-engine/control-rig-python-scripting-in-unreal-engine ,
+https://dev.epicgames.com/documentation/en-us/unreal-engine/python-api/class/RigVMController ,
+https://dev.epicgames.com/documentation/en-us/unreal-engine/python-api/class/ControlRigBlueprint
+
+**What's CONFIRMED (read directly off docs pages):**
+- `unreal.ControlRigBlueprint` is the asset class. `get_controller()` returns
+  the graph controller; `get_hierarchy_controller()` returns the hierarchy
+  controller; `get_available_rig_units()` lists what can be added.
+- `unreal.RigVMController` (module: ControlRigDeveloper) is the real
+  graph-mutation object:
+  - Node creation: `add_unit_node()`, `add_variable_node()`,
+    `add_comment_node()`, `add_branch_node()`, `add_if_node()`,
+    `add_array_node()`, `add_template_node()`, `add_function_reference_node()`.
+  - Wiring: `add_link(output_pin_path, input_pin_path, setup_undo_redo=True, print_python_command=False)`,
+    `break_link()`, `break_all_links()`. Pins are addressed by string path
+    (e.g. `"NodeA.Translation.X"`), which is notably **more** reachable than
+    Blueprint's `EdGraphPinType` (which exposes no readable fields at all —
+    see the Blueprints section below).
+  - Pin values: `set_pin_default_value()`, `get_pin_default_value()`,
+    `add_array_pin()`, `remove_array_pin()`.
+  - Removal: `remove_node()`, `remove_exposed_pin()`.
+  - `print_python_command=True` on these calls echoes back the exact Python
+    call that reproduces a hand-performed edit — genuinely useful for step-2b
+    confirmation, since the editor can generate the ground-truth call shape
+    for any edit made by hand first, rather than guessing it blind.
+- `unreal.RigHierarchyController` (module: ControlRigDeveloper) —
+  `add_bone(name, parent, transform)` and other hierarchy-side element
+  creation, a separate object from the graph controller.
+
+**What still needs a live probe before writing a single tool:**
+- `ControlRigBlueprint.get_controller()`'s exact return-object identity —
+  confirm it is actually the same `RigVMController` class documented above,
+  not a differently-scoped wrapper.
+- Whether this installed 5.8 build even has the Control Rig plugin enabled
+  (it's optional).
+- `add_unit_node`'s first argument shape — RESEARCH_NEW_DOMAINS.md found two
+  sources disagreeing slightly on wording (`script_struct, method_name,
+  position` per one source vs. the RigVMController page's own listing);
+  resolve this against the actual page or a live `help()` call, not by
+  guessing which source is right.
+
+**How to build this:** confirm `get_controller()`'s return type and the
+`add_unit_node` signature live first (both are cheap, single-call probes
+given `print_python_command=True` can echo the correct call shape back after
+one hand-performed edit in the editor). Once confirmed, this is comparable
+in richness to the material-graph tooling already built in this project
+(named Controller object, string-addressed pins, real node/link CRUD) and
+arguably *easier* to verify than materials, because pins are
+string-addressable instead of needing the node-selector-by-title workaround
+material nodes needed. Treat it with the same per-tool workflow as any other
+domain: docs first (done above), live probe to confirm, then write the tool,
+one at a time.
+
+---
+
+## Automation Tests — BUILDABLE, lowest-risk of the new domains
+
+Source: https://dev.epicgames.com/documentation/en-us/unreal-engine/python-api/class/PythonTestRunner ,
+https://dev.epicgames.com/documentation/unreal-engine/API/Plugins/AutomationTestToolset/UAutomationTestToolset
+
+**What's CONFIRMED:**
+- `unreal.PythonTestRunner` — classic Python API, documented. `create()`,
+  `get_tests()`, `run_test()`, `get_last_test_result()`. Goes through the
+  existing pure-Python bridge architecture with zero new infrastructure
+  needed — this is the one domain in the whole report with two independent
+  real paths, and this is the one that needs nothing new.
+- `UAutomationTestToolset` also exists (`DiscoverTests(bool bForceRediscover)`,
+  `ListTests(NameFilter, TagFilter, Limit)`, `RunTests(TestNames)`,
+  `RunTestsByFilter(FilterExpression)`, `GetTestStatus()`, `GetTestResults()`,
+  `StopTests()`) but uses the `UToolsetDefinition`/`AICallable` C++
+  registration pattern — a second integration path alongside Python Remote
+  Execution, new architecture for this project. Defer this half; it's real
+  but not worth building ahead of the pure-Python win above.
+
+**What still needs a live probe:** `PythonTestRunner.create()`'s exact
+argument shape and `run_test()`'s return value shape — not because anything
+here looks doubtful, but because this project's own rule is that no tool
+gets written on docs alone, ever, regardless of how settled a finding looks.
+
+**How to build this:** build `PythonTestRunner`-based tooling first — it's
+ranked first across all 8 researched domains precisely because it needs no
+new architecture and has two independent confirmations. Probe
+`create()`/`run_test()` live, then write a thin wrapper following this
+project's usual tool conventions (`guarded()`, independent read-back on
+`get_last_test_result()`).
+
+---
+
+## GAS (Gameplay Ability System) — read-only inspection ONLY, narrow scope
+
+**This is not "GAS is now buildable."** GAS *setup* — wiring an
+AttributeSet, authoring GameplayEffects, authoring the AbilitySystemComponent
+onto an actor from scratch, granting or activating abilities — remains a C++
+job, confirmed, not changed by this finding. RECIPE_DESIGNS.md's framing
+holds: "Anything described as a 'spell' or 'ability' in this document is a
+VFX + audio + maybe a timed state flag, never a real ability graph with
+cost, cooldown, or targeting logic."
+
+**What's CONFIRMED, with a caveat on source quality:**
+`unreal.AbilitySystemComponent` is a real, documented Python API class,
+constructible (`outer: Object | None = None, name: Name | str = 'None'`),
+exposing at least one read-write editor property, `activatable_abilities`
+(a `GameplayAbilitySpecContainer`). Source:
+https://dev.epicgames.com/documentation/en-us/unreal-engine/python-api/class/AbilitySystemComponent —
+**caveat: the direct fetch of this page 404'd in the research session; the
+class's existence and the `activatable_abilities` property are sourced from
+a search-engine snippet of that page, not a direct read.** This is the
+weakest-sourced finding in the entire research report and needs
+re-confirmation, more than any other domain here, before even a read-only
+tool is written.
+
+No `give_ability`/`activate_ability`-shaped Python method was found on this
+class. The C++ side has `GiveAbility`
+(https://dev.epicgames.com/documentation/unreal-engine/API/Plugins/GameplayAbilities/UAbilitySystemComponent/GiveAbility);
+no Python counterpart surfaced.
+
+**What this means for the one tool worth building:** `get_ability_system_state(actor_name)`
+— read-only, wrapping `get_editor_property('activatable_abilities')` and
+whatever attribute-set properties a live probe turns up, using the exact
+same `get_editor_property` mechanism `scene.get_property` already uses. This
+tool only works on an actor that **already has GAS set up** by some other
+(C++ or hand-authored) path. It is not a GAS-authoring tool, not an
+ability-granting tool, and should never be described as either in its own
+docstring.
+
+**How to build this:** before writing anything, retry the direct docs fetch
+or run `dir(unreal.AbilitySystemComponent)` against the live editor — this
+is a mandatory re-confirmation given the weak source, not an optional
+nicety. Once confirmed, build the single read-only tool named above, scoped
+explicitly to inspection of an already-set-up actor.
+
+---
+
+## Morph Targets — PARTIALLY BUILDABLE, cheap to confirm
+
+Sources: https://docs.unrealengine.com/5.0/en-US/PythonAPI/class/MorphTarget.html ,
+https://dev.epicgames.com/documentation/unreal-engine/API/Runtime/Engine/USkeletalMesh/GetMorphTargets ,
+https://docs.unrealengine.com/4.27/en-US/API/Runtime/Engine/Engine/USkeletalMesh/K2_GetAllMorphTargetNames/index.html
+
+**What's CONFIRMED:** `unreal.MorphTarget` is a real, documented Python API
+class (inherits `unreal.Object`). On the engine side,
+`USkeletalMesh.GetMorphTargets()` and the Blueprint-exposed
+`K2_GetAllMorphTargetNames()` are real, confirmed C++/BlueprintAPI calls.
+
+**What is NOT confirmed, and must not be upgraded to a flat assertion:**
+whether `unreal.SkeletalMesh` (the Python wrapper, not the C++ class) exposes
+the same accessor under a `get_morph_targets`-shaped name, per this guide's
+own gotcha #13 ("don't assume a struct has the members its C++ equivalent
+has" — exactly the failure mode that hid `get_component_location` from
+`PrimitiveComponent`). Driving a morph target's weight at runtime
+(`SetMorphTarget`/`ClearMorphTargets` in Blueprint/C++) is also unconfirmed
+on `unreal.SkeletalMeshComponent`. Only 2 of the 5-step search protocol were
+run for this domain (class-name confirm, docs-page read) — no `dir()` sweep,
+no sibling-Library check was possible without editor access. This domain
+should NOT be marked "confirmed absent" or "confirmed present" on docs
+alone.
+
+**How to build this:** run `dir(unreal.SkeletalMesh)` and
+`dir(unreal.SkeletalMeshComponent)` against the live 5.8 editor for the
+exact getter/setter names — this is a cheap, single-session probe that
+answers most of the open question at once. If a `get_morph_targets`-shaped
+name turns up, build the discovery tool first (listing morph target names on
+an asset); weight-setting is a separate, second probe on the Component side
+and may turn out narrower.
+
+---
+
+## Confirmed out of scope: Animation Mixer
+
+Epic's "Anim Mixer" (Sequencer Animation Mixer) is an experimental UE 5.8
+plugin built on the Unreal Animation Framework and Animation Blueprints. Its
+runtime classes (`UMovieSceneAnimNextTargetSystem`, the
+`MovieSceneAnimMixer`/`MovieSceneAnimMixerEditor` plugin pair) have no
+Python API class page found after a real search (plugin docs, site search
+on the python-api index, all came back C++-only). A real, adjacent Python
+surface exists — `unreal.AnimNextAnimationGraphLibrary.add_animation_graph`
+— but it is AnimNext graph assembly, a different and narrower capability,
+not Sequencer animation mixing; do not build it under the "Animation Mixer"
+label if it's ever picked up. Source:
+https://dev.epicgames.com/documentation/en-us/unreal-engine/python-api/class/AnimNextAnimationGraphLibrary ,
+https://dev.epicgames.com/documentation/unreal-engine/API/Plugins/MovieSceneAnimMixerEditor
+
+---
+
+## Confirmed out of scope: Niagara Graph-Level Authoring
+
+`unreal.NiagaraPythonModule` exposes exactly two methods (`GetObject()`,
+`Init()`) and is a thin wrapper around one already-existing module instance
+already placed in an emitter's stack — it cannot create a module, create a
+graph node, or wire a connection. The graph-holding types
+(`UNiagaraScriptSourceBase`/`UNiagaraScriptSource`) have no Python API class
+page at all. This confirms, more strongly than before, PLAN.md's existing
+scope decision: instance-level control (spawn/parameterize/assemble from
+existing modules and templates) is the correct ceiling; graph-level
+authoring needs the C++ escape hatch if ever required. Source:
+https://dev.epicgames.com/documentation/unreal-engine/API/Plugins/NiagaraEditor/UNiagaraPythonModule ,
+https://dev.epicgames.com/documentation/en-us/unreal-engine/python-api/class/NiagaraScript ,
+https://dev.epicgames.com/documentation/unreal-engine/API/Plugins/Niagara/UNiagaraScriptSourceBase
+
+---
+
+## Confirmed out of scope: Gizmo Control
+
+No Python binding surfaced for the viewport gizmo framework
+(`UEditorInteractiveGizmoManager`/`UInteractiveGizmoManager`) across a real
+multi-angle search (class-name search, full page read, sibling-Library
+check all came back negative; only the live `dir()` sweep, step 3 of 5,
+could not be run without editor access). The viewport-gizmo interaction
+model is inherently mouse-drag-driven anyway and doesn't map cleanly onto a
+scripted call; `set_actor_transform` already covers the same end-state need
+without needing gizmo interaction at all. Source:
+https://dev.epicgames.com/documentation/unreal-engine/API/Editor/EditorInteractiveToolsFramework/UEditorInteractiveGizmoManager ,
+https://dev.epicgames.com/documentation/unreal-engine/API/Runtime/InteractiveToolsFramework/UInteractiveGizmoManager
+
+---
+
 ## Per-tool workflow
 
 Work one tool at a time, start to finish, before moving to the next. Do not

@@ -186,6 +186,16 @@ reason.
   path with `replace=True` + `confirm=True`. `select_all` and
   `invert_selection` are never used: they act on whatever the user happened to
   have selected.
+- `set_actor_label(actor_name, new_label)` — **planned, not yet built.** A real
+  gap, not a deferred-on-purpose one: `tag_actor` and `set_actor_folder` both
+  have a getter and a setter, but labels only have `get_actor_label()` (read
+  via `list_actors`/`get_selected_actors`); nothing writes one. The target
+  call is `AActor.set_actor_label(new_label, bMarkDirty=True)`, the direct
+  counterpart to the getter already in use. No known read/write asymmetry
+  gotcha like `bHidden`'s — this is "nobody built the setter yet," not an
+  engine-side restriction. See TOOL_BUILDING_GUIDE.md's `scene.py` inventory
+  entry for the full build spec (exact call, pattern to mirror, security
+  tier) before writing it.
 - `set_actor_parent_component` — **deliberately not built.** `attach_actor`
   covers actor-level parenting, which is what the scene graph needs; attaching
   to a specific *component* socket is `Actor.attach_to_component` and belongs
@@ -588,8 +598,9 @@ which closes the open question left in TOOL_BUILDING_GUIDE.md's gotcha 1.
 - `compile_blueprint` — done (MVP).
 - `create_blueprint` — `AssetToolsHelpers.get_asset_tools().create_asset(..., Blueprint, BlueprintFactory)`.
 - `add_blueprint_variable` — `BlueprintEditorLibrary.add_member_variable`.
-- `add_blueprint_function_call_node` / `add_blueprint_event_node` — graph editing via `K2Node` creation, the deferred "C++ plugin for graph wiring" extension from the original plan; likely the first thing that needs the C++ escape hatch since pure-Python Blueprint graph editing support is thin.
-- `get_blueprint_compile_errors` — parse the compiler log, not just success/fail, so the agent gets an actual error message to react to.
+- `add_blueprint_call_function_node` / `add_blueprint_event_node` — **built and live-verified**, and no longer deferred. See the Blueprint graph section below.
+- `add_blueprint_variable_node`, `add_blueprint_branch_node`, `add_blueprint_comment`, `add_blueprint_member_variable`, `create_blueprint_function_graph`, `set_blueprint_node_position`, `connect_blueprint_pins`, `delete_blueprint_nodes`, `list_blueprint_graph_nodes`, `list_blueprint_available_nodes` — built, `tools/blueprint_graph.py`.
+- `get_blueprint_compile_errors` — **built**. Compiles and then reads per-node error, warning and note messages back, returning `status` and `error_count`. This is the read side `compile_blueprint` (which reports only that the request was dispatched) never had.
 - `set_blueprint_parent_class` — `BlueprintEditorLibrary.reparent_blueprint`.
 
 ### Animation
@@ -599,6 +610,20 @@ which closes the open question left in TOOL_BUILDING_GUIDE.md's gotcha 1.
 - `import_animation_sequence` — `AssetImportTask` with `FbxImportUI` animation settings.
 - `set_skeletal_mesh_physics_asset` — `SkeletalMesh.set_editor_property('physics_asset', ...)`.
 - `retarget_animation` — `AnimationLibrary`/IK Rig Python API (newer engine versions only; confirm availability before committing to this one).
+- `get_skeletal_mesh_sockets(actor_name)` — wraps `SkeletalMesh.get_all_socket_names()`
+  or `SkeletalMeshComponent.does_socket_exist` (confirm exact call shape live
+  before committing, per this project's own discipline — not yet probed).
+  Identified as a real, concrete gap by RECIPE_DESIGNS.md: no existing
+  primitive lists a skeletal mesh's actual socket names, so every
+  socket-attach recipe (`attach_prop_to_socket`, `equip_weapon`,
+  `cast_spell_effect`, and transitively `plant_bomb`'s carried mode) has to
+  attach optimistically and infer success indirectly from
+  `get_attach_parent_socket_name`'s read-back, rather than checking the
+  socket exists before trying. Higher-leverage than its single-tool scope
+  suggests — it's a shared dependency for 4 recipes, so building it once
+  upgrades all 4 from "attach and hope" to "verify the target, then attach
+  with confidence." See RECIPE_DESIGNS.md's "Composability summary" for the
+  fan-out argument in full.
 
 ### Physics and collision
 
@@ -717,6 +742,33 @@ helper rather than repeating in every tool.
 - `paint_landscape_layer` — layer weight painting via `LandscapeProxy` API.
 - `add_foliage_type` / `paint_foliage_instances` — `InstancedFoliageActor`/`FoliageEditorSubsystem` (API coverage here is spotty; verify before committing to full scope).
 
+### Blueprint graph editing (built, 13 tools, live-verified)
+
+`unreal.BlueprintGraphEditor` is the whole story here, and it overturns a
+conclusion this project carried for a long time. Blueprint graph nodes were
+recorded as unreachable because `EdGraph.Nodes` is a protected property and nodes
+are not addressable by object path, which made Blueprint wiring the flagship
+example of something that needs the C++ escape hatch. That was true of
+`BlueprintEditorLibrary` and false about the domain: `BlueprintGraphEditor` is a
+different class, returns real `K2Node_*` handles from `list_all_nodes()`, and
+those handles support pin lookup, pin type schemas and node metadata.
+
+Wiring goes through `destination_pin.assign(source_pin)`. Three link-oriented
+calls the API also offers — `try_create_connection` on either the pin or the
+library, and `list_connected_pins` — all wedge the Remote Control request with
+an empty log and no return value, and no pin exposes `is_linked`, so a link
+cannot be read back directly at all. `connect_blueprint_pins` verifies by
+compiling and diffing the set of error-bearing node titles before and after the
+assign.
+
+Other measured traps: an exec pin's `Name` is null (so it renders as the string
+`'None'` and needs a selector token rather than a name), `get_pin_direction`
+cannot pythonize its return value, node positions are `IntPoint` while node sizes
+are `Vector2D`, `Blueprint.NewVariables` is protected so member variables are
+read back through `BlueprintEditorLibrary.list_member_variable_names`, and
+`BlueprintEditorSubsystem` does not exist in this build. Full detail is in
+TOOL_BUILDING_GUIDE.md.
+
 ### Sequencer / cinematics
 
 - `create_level_sequence` — `AssetToolsHelpers` + `LevelSequenceFactoryNew`.
@@ -732,10 +784,16 @@ helper rather than repeating in every tool.
 
 ### Play-in-editor and verification (ties everything above together)
 
-- `launch_pie` / `stop_pie` — `EditorLevelLibrary.editor_play_simulate` or `UnrealEditorSubsystem` PIE control.
-- `capture_viewport_screenshot` — `AutomationLibrary.take_high_res_screenshot`, the already-ranked "good, close to core" extension.
-- `get_output_log` (filtered by severity/time window since last call) — makes the PIE loop actually useful: run, then read back what happened, not just that it launched.
-- `run_automation_test` — `AutomationController` Python bindings, if the project already has functional tests defined.
+- `start_play_in_editor` / `start_play_in_editor_simulate` / `stop_play_in_editor` / `wait_for_play_state` / `get_play_state` —
+  **built**, via `LevelEditorSubsystem.editor_request_begin_play`/`editor_request_end_play`.
+  (This entry previously read `launch_pie`/`stop_pie` from an earlier planning pass,
+  naming the same capability before it was built; renamed here to match the real,
+  shipped tool names in `tools/play.py` rather than leaving two names for one thing.)
+- `capture_viewport_screenshot` — `AutomationLibrary.take_high_res_screenshot`, the already-ranked "good, close to core" extension. Not yet built.
+- `get_output_log` (filtered by severity/time window since last call) — makes the PIE loop actually useful: run, then read back what happened, not just that it launched. Not yet built.
+- `run_automation_test` — superseded by the Automation Tests domain in TOOL_BUILDING_GUIDE.md
+  (`unreal.PythonTestRunner`, confirmed real and sourced, plus the `UAutomationTestToolset`
+  AICallable path) — see that section for exact calls before building this.
 
 ### Project and build
 
@@ -774,12 +832,15 @@ like these are:
   `set_material_scalar_parameter`, which writes to a shared instance asset and
   so cannot vary one actor from another. There is no `theme` lookup table yet;
   the caller passes the class and material paths directly.
-- `build_and_test_pie(level, duration_seconds)` — `launch_pie`,
-  `get_output_log` filtered to warnings/errors only, `capture_viewport_screenshot`,
-  `stop_pie`, bundled as one call returning a pass/fail verdict plus the
-  evidence. This is the actual build-test-fix loop Phase 2 needs, expressed
-  as a single tool instead of four calls the orchestrator has to sequence
-  and get the timing right on every time.
+- `build_and_test_pie(level, duration_seconds)` — `start_play_in_editor`,
+  `wait_for_play_state`, `get_output_log` filtered to warnings/errors only,
+  `capture_viewport_screenshot`, `stop_play_in_editor`, bundled as one call
+  returning a pass/fail verdict plus the evidence. This is the actual
+  build-test-fix loop Phase 2 needs, expressed as a single tool instead of
+  five calls the orchestrator has to sequence and get the timing right on
+  every time. `start_play_in_editor`/`wait_for_play_state`/`stop_play_in_editor`
+  are already built (see `tools/play.py`); `get_output_log` and
+  `capture_viewport_screenshot` are not yet.
 - `create_pickup_item(mesh_path, blueprint_name, variable_name)` — a genuinely
   common beginner-tutorial pattern: `create_blueprint` parented to Actor,
   `add_component` (static mesh + collision sphere), `add_blueprint_variable`,
@@ -812,6 +873,177 @@ like these are:
   calls for what is, by far, usually a "bring in this whole folder of art"
   request rather than a one-off.
 
+### Composite recipes from RECIPE_DESIGNS.md (9 designed, full spec there)
+
+Full designs, sequences, and honesty calibration for each of these live in
+`RECIPE_DESIGNS.md`; this catalog entry is the index-level summary only —
+read that doc before implementing any of them. All 9 share the scope
+baseline RECIPE_DESIGNS.md states up front: no GAS, no Blueprint graph node
+editing, no Animation Blueprint state-machine authoring, no Niagara
+module/graph authoring, no Sequencer, no material-graph authoring inside a
+recipe's hot path. Every recipe below is a composition of primitives already
+built or separately catalogued, never new gameplay logic.
+
+- `attach_prop_to_socket(target_actor_name, prop_class_path, socket_name, attach_rule, relative_transform_offset)` —
+  spawn an actor and rigidly attach it to a named socket, verifying the
+  attachment actually landed on the requested socket (via
+  `get_attach_parent_socket_name`) rather than trusting the attach call's
+  return value. Fully achievable today on built, live-verified primitives
+  (`spawn_actor`, `attach_actor`, `get_attach_parent_socket_name`); the one
+  gap is socket discovery (see `get_skeletal_mesh_sockets` above), which
+  this recipe works around by attaching optimistically and inferring a
+  wrong guess from a mismatched read-back. The reusable building block
+  nearly every other recipe below calls or should call.
+- `bring_character_to_life(actor_name, idle_animation_path, breathing_play_rate, loop)` —
+  assigns and loops an idle/breathing AnimSequence at a chosen play rate on
+  a character already in the level. Fully achievable at the instance-level
+  animation scope: this is "assign one AnimSequence, loop it, set a play
+  rate," not procedural breathing or a real Animation Blueprint state
+  machine, and it checks the actor isn't already in a valid `blueprint`
+  animation mode before overwriting it (switching a properly-rigged
+  character to single-node playback is a downgrade, not an upgrade).
+- `equip_weapon(actor_name, weapon_class_path, weapon_type, socket_name, hand)` —
+  `attach_prop_to_socket` with weapon-specific socket defaults and a
+  fallback-candidate retry loop (try `hand_r`, then `hand_l`, then
+  `spine_01`, then root) driven by real read-back state, not a single
+  hardcoded attempt. Fully achievable on built primitives, same socket-name
+  caveat as the building block above.
+- `plant_bomb(location_or_attach_to_actor, bomb_blueprint_path, fuse_niagara_system_path, tick_sound_cue_path)` —
+  places or attaches a bomb prop with optional fuse VFX and tick sound.
+  Placement and VFX are fully achievable on built/catalogued primitives; the
+  sound step is real but conditionally inert outside Play-In-Editor, which
+  the recipe must state in its output, not discover live during a demo.
+- `cast_spell_effect(actor_name, hand_socket_name, spell_niagara_system_path, cast_sound_cue_path, flash_light_actor_name)` —
+  **VFX + sound presentation of a spell, not a spell.** Spawns and attaches
+  a Niagara effect at a hand socket, with optional sound and an optional
+  one-shot light flash. No cost, cooldown, targeting, or damage — GAS is
+  C++-only (see RESEARCH_NEW_DOMAINS.md's GAS finding, which does not change
+  this). VFX spawn/attach/parameterize is fully achievable; the light
+  "pulse" is only half-achievable — a one-shot brightness step is buildable,
+  the fade back to normal is not, without a second scheduled call or logic
+  this MCP cannot author.
+- `afflict_with_limp(actor_name, severity, limp_animation_path)` — a judgment
+  tree, not a fixed sequence: swaps to a real limping AnimSequence if one is
+  supplied, falls back to an irregular `set_play_rate` value if not (which
+  the recipe must honestly report as "slower," not "injured-looking"), and
+  falls back again to an existing AnimBP instance variable if the character
+  is in `blueprint` mode and such a variable happens to already be exposed.
+  Cannot author a new AnimBP state or blend. Reports which of the three
+  mechanisms was actually used.
+- `spawn_hud(widget_blueprint_path, text_fields, create_if_missing)` —
+  **blocked on 3 unbuilt UMG primitives** (`create_widget_blueprint`,
+  `set_widget_text`, `add_widget_to_viewport`), all catalog-only as of this
+  writing, plus one unconfirmed question (whether a named child widget
+  inside a WidgetBlueprint can be resolved from Python at all — possibly the
+  same "node has no stable identity but its title" problem the material
+  graph tools hit). Aspirational as named; do not build before the UMG
+  primitives are built and live-verified individually.
+- `damage_state_transition(actor_name, damage_material_instance_path, spark_niagara_system_path, tilt_degrees)` —
+  swaps a mesh's material slot to a damaged/destroyed variant, with optional
+  tilt and spark VFX, read back via `get_mesh_material_slot`. Fully
+  achievable today; every primitive it needs is already built and
+  live-verified. The cheapest, most reliable recipe in the whole set.
+- `scene_reveal_sequence(focus_actor_name, mood_before, mood_after, reveal_niagara_system_path)` —
+  a scripted "theatrical unveiling" beat: `light_scene_preset(mood_before)`
+  → VFX puff at the focus actor → `light_scene_preset(mood_after)`. Fully
+  achievable today, pure composition of two already-shipped presets plus one
+  VFX spawn, no new primitives.
+- `squad_formation_spawn(class_path, count, center, formation, facing_target, spacing)` —
+  spawns N actors in a deliberate line/wedge/circle formation, each facing a
+  shared target resolved live (not a hardcoded coordinate) via
+  `get_property`/scene-state lookup when `facing_target` is an actor name.
+  Fully achievable with only built primitives (`spawn_actor`,
+  `list_actors`/`get_scene_state`, `get_property`). No catalog gaps.
+
+**Build order** (RECIPE_DESIGNS.md's own recommendation, by
+foundation-readiness, not demo flashiness): `attach_prop_to_socket` first →
+`damage_state_transition`/`scene_reveal_sequence` (zero new gaps, ship next)
+→ `equip_weapon`/`plant_bomb`/`squad_formation_spawn` (depend only on
+`attach_prop_to_socket` plus built primitives) →
+`bring_character_to_life`/`afflict_with_limp` (buildable today at the
+instance-level-animation scope, ship with the honest "lesser fallback"
+documented) → `cast_spell_effect` (ship with the light-pulse limitation
+stated plainly) → `spawn_hud` last (blocked on the UMG primitives above;
+build and live-verify those individually first).
+
+### Generic, domain-general recipe ideas (not in RECIPE_DESIGNS.md, composed from existing primitives)
+
+Beyond the character/weapon/UI-specific recipes above, these are reusable
+regardless of genre — the kind of composite any project built on this MCP
+would want, not just this one's demo scenarios. Each is composed from
+primitives already built or catalogued above; none requires a new primitive
+unless named explicitly.
+
+- `snapshot_and_restore_scene(label)` / `restore_scene_snapshot(label)` —
+  capture every actor's transform and a chosen property set to a
+  named save-point (`list_actors`/`get_scene_state` plus `get_property` per
+  actor, serialized to a snapshot structure held by the MCP server, not a
+  new Unreal-side asset), then restore it on request by replaying
+  `set_actor_transform`/`set_property` calls per actor. Pitch: makes
+  iterative AI-driven scene edits undoable without relying on Unreal's own
+  editor undo stack, which this bridge doesn't control call-by-call. Inputs:
+  a label, an optional actor-name filter. Honesty verdict: fully achievable
+  with only built primitives (`list_actors`, `get_scene_state`, `get_property`,
+  `set_actor_transform`, `set_property`) — the snapshot storage itself is
+  new code in the MCP server process, not a new Unreal API call, so it's
+  cheap to build. Does not restore actors that were deleted or spawned
+  between snapshot and restore; a full version of that needs
+  `spawn_actor`/`delete_actor` diffing against the snapshot's actor-name set,
+  worth naming as a known limitation rather than silently handling it.
+- `batch_property_sweep(actor_filter, property_name, value_or_fn)` — apply
+  the same property change across every actor matching a tag or class
+  filter (`find_actors_by_tag` or a class-name filter over `list_actors`),
+  with a per-actor independent read-back via `get_property` after each
+  write, not a bare loop that trusts the setter's return. Pitch: the
+  "batch recolor every crate" or "disable collision on every prop tagged
+  destructible" request, done once with verification instead of N
+  individual `set_property` round-trips the orchestrator has to sequence
+  itself. Inputs: a tag or class filter, the property name, either a single
+  value or a per-actor variation function (position in the filtered list →
+  value). Honesty verdict: fully achievable with only built primitives
+  (`find_actors_by_tag`, `list_actors`, `set_property`, `get_property`); it
+  inherits `set_property`'s existing scope limit (plain `setattr` only, per
+  TOOL_BUILDING_GUIDE.md's gotcha #4), so a property that needs
+  `set_editor_property` or a dedicated setter is out of reach for this
+  recipe until `set_property` itself is extended, not a reason to silently
+  patch around it here.
+- `clone_and_vary(source_actor_name, count, variation_fn)` — duplicate an
+  actor N times with a parameterized per-copy variation function (a
+  position/rotation offset, a material-slot swap, a tag), generalizing the
+  shared pattern underneath `set_dressing_pass`'s jittered placement and
+  `squad_formation_spawn`'s geometric placement into one reusable call for
+  any per-copy variation, not just position. Inputs: source actor, count,
+  a variation function taking the copy index and returning a dict of
+  `{transform_delta, material_override, tag}`-shaped overrides, applied via
+  `duplicate_actor` + `set_actor_transform`/`set_mesh_material_slot`/`tag_actor`
+  per copy. Honesty verdict: fully achievable with only built primitives
+  (`duplicate_actor`, `set_actor_transform`, `set_mesh_material_slot`,
+  `tag_actor`); read back via `list_actors` to confirm the expected count
+  landed, matching `squad_formation_spawn`'s own batch-spawn verification
+  pattern, since a batch operation failing partway through should be caught
+  rather than silently under-reported.
+- `verify_and_report_scene_health()` — a read-only sweep that calls
+  `get_scene_state`/`list_actors` plus a lightweight check per actor (does
+  it have the component type its class implies, is its transform within a
+  sane bounds check, does its material-slot reference actually resolve via
+  `get_mesh_material_slot`) and reports anomalies as a flat list rather than
+  raising on the first one found. Pitch: a cheap sanity pass after any batch
+  operation above, or before a demo, that catches "one actor in a batch of
+  50 silently didn't get the property write" without the caller having to
+  write that check themselves every time. Honesty verdict: fully achievable
+  with only built, read-only primitives (`list_actors`, `get_scene_state`,
+  `get_property`, `get_mesh_material_slot`); the "sane bounds check" part is
+  necessarily project-specific (what counts as a sane transform varies by
+  level), so this recipe can only flag "no components at all" / "material
+  slot references a non-existent asset"-class problems generically, not
+  judge whether a value is correct for a given game — stated as an open
+  scope question, not solved here.
+
+These four are a new, smaller set than the 9 above and deliberately broader
+rather than character/action-specific — no new primitive is proposed beyond
+what's already named (`get_skeletal_mesh_sockets`, already covered above)
+or built.
+
 ### Where presets live in the architecture
 
 Presets are not a new transport or a new security tier; they're ordinary
@@ -843,7 +1075,7 @@ before moving to the next, same discipline as the MVP:
    that reason. The remaining presets still wait on phases 2–4.
    `light_scene_preset` returns each primitive's getter output as read-back
    evidence rather than asserting success from the setter's return value.
-6. **Last, and likely needs the C++ escape hatch or has thin Python coverage:** Blueprint graph node wiring, Niagara module/script graph editing, Sequencer keyframing, Animation Blueprint state machine editing, Replication Graph configuration.
+6. **Last, and likely needs the C++ escape hatch or has thin Python coverage:** Niagara module/script graph editing, Sequencer keyframing, Animation Blueprint state machine editing, Replication Graph configuration. Blueprint graph node wiring was on this list and is now built; see the Blueprint graph section below.
 7. **MetaHuman, as its own track once PIE verification exists:** the API is real and documented (MetaHuman 5.7+, UE 5.8+) but every operation needs visual confirmation to catch silent failures (bad topology, missing rig), so it depends on phase 4's screenshot tooling rather than slotting in by API-maturity alone.
 
 ## Phase 2 preview (not building yet, just context)

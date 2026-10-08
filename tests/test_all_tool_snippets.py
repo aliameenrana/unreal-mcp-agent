@@ -111,6 +111,22 @@ DUMMY = {
     "table_path": "/Game/MCPTest/ZZAudit.ZZAudit",
     "fmt": "csv",
     "max_rows": 5,
+    # blueprint_graph. Node/pin selectors are titles, so the audit value just has
+    # to be a plausible string; nothing in the audit resolves them.
+    "event_name": "ZZAudit",
+    "variable_name": "ZZAudit",
+    "pin_type": "float",
+    "function_name": "ZZAudit",
+    "graph_name": "EventGraph",
+    "text": "ZZAudit",
+    "node_title": "ZZAudit",
+    "node_titles": ["ZZAudit"],
+    "from_node": "ZZAudit",
+    "from_pin": "ZZAudit",
+    "to_node": "ZZAudit",
+    "to_pin": "ZZAudit",
+    "x": 0.0,
+    "y": 0.0,
 }
 
 # Per-tool extras, for arguments whose meaning is tool-specific.
@@ -127,6 +143,11 @@ PER_TOOL = {
     # Every replication flag is optional and defaults to None, which this tool
     # treats as a no-op, so the audit has to ask for one explicitly.
     "set_replication_flags": {"replicates": True},
+    # `mode` is shared with another tool's "query_only" default, so
+    # add_blueprint_variable_node's own get/set vocabulary is supplied per tool.
+    "add_blueprint_variable_node": {"mode": "get"},
+    # A destructive tool needs confirm=True before it will build a snippet.
+    "delete_blueprint_nodes": {"confirm": True},
 }
 
 # A payload shaped like a real editor reply. Tools read specific keys out of it

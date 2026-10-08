@@ -27,6 +27,7 @@ from unreal_mcp.remote_snippets import (
     guarded,
 )
 from unreal_mcp.tools import (
+    blueprint_graph,
     blueprints,
     components,
     lighting,
@@ -87,6 +88,7 @@ def fake_bridge(monkeypatch):
     monkeypatch.setattr(scene, "get_bridge", lambda: fb)
     monkeypatch.setattr(materials, "get_bridge", lambda: fb)
     monkeypatch.setattr(blueprints, "get_bridge", lambda: fb)
+    monkeypatch.setattr(blueprint_graph, "get_bridge", lambda: fb)
     monkeypatch.setattr(lighting, "get_bridge", lambda: fb)
     monkeypatch.setattr(components, "get_bridge", lambda: fb)
     monkeypatch.setattr(meshes, "get_bridge", lambda: fb)
