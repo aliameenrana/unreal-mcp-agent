@@ -127,6 +127,7 @@ DUMMY = {
     "to_pin": "ZZAudit",
     "x": 0.0,
     "y": 0.0,
+    "new_label": "ZZAudit",
 }
 
 # Per-tool extras, for arguments whose meaning is tool-specific.

@@ -91,6 +91,92 @@ def get_mesh_bounds(mesh_path: str) -> dict:
     }
 
 
+def get_skeletal_mesh_sockets(mesh_path: str) -> dict:
+    """
+    Lists a SkeletalMesh's sockets: name, parent bone, and the socket's local
+    transform relative to that bone.
+
+    RECIPE_DESIGNS.md identified this as the shared dependency for four recipes
+    (`attach_prop_to_socket`, `equip_weapon`, `cast_spell_effect`, and
+    `plant_bomb`'s carried mode). Without it each of those attaches
+    optimistically and infers a wrong guess from a mismatched
+    `get_attach_parent_socket_name` read-back, which cannot tell a misspelled
+    socket from a socket that exists but resolved elsewhere.
+
+    Sockets are read by index, not by a name list: `SkeletalMesh` has
+    `num_sockets()` and `get_socket_by_index(i)` but **no `get_all_socket_names`**,
+    which is what PLAN.md guessed. The name lives on `socket_name`, not `name`.
+
+    An empty list is a real answer, not a failure: most meshes have no sockets.
+    `socket_count` is reported separately from `sockets` so an agent can tell
+    "this mesh has none" from "the read failed".
+
+    **Verification status, stated precisely.** Both rejection paths were checked
+    live against the editor (a missing path, and a Material passed in place of a
+    mesh), and the socket-reading loop was run against a real `SkeletalMesh`
+    object obtained with `unreal.new_object`, which returned `socket_count: 0`,
+    the correct answer for a fresh mesh. What is **not** verified is this tool
+    returning a non-empty socket list, because no SkeletalMesh asset exists in
+    this project and none can be created from Python: the only conversion
+    factory, `SkeletalMeshFromStaticMeshFactory`, has no settable mesh attribute
+    (the same trap as `FoliageType_InstancedStaticMeshFactory`), and importing
+    one needs an .fbx, which the project does not have. `socket_name` and
+    `bone_name` were confirmed as the real property names from `dir()` on the
+    live struct, so the field reads are sound; only the populated case is
+    untested.
+    """
+    security.enforce_tier("get_skeletal_mesh_sockets")
+
+    body = (
+        f"m = {load_asset(mesh_path)}\n"
+        f"if m is None:\n"
+        f"    OUT = {{'found': False, 'error': {mesh_path!r} + ' did not load',\n"
+        f"          'sockets': [], 'socket_count': 0}}\n"
+        f"elif not isinstance(m, {UNREAL}.SkeletalMesh):\n"
+        f"    OUT = {{'found': False,\n"
+        f"          'error': 'Not a SkeletalMesh: ' + type(m).__name__\n"
+        f"                     + ' (sockets only exist on SkeletalMesh assets)',\n"
+        f"          'sockets': [], 'socket_count': 0}}\n"
+        f"else:\n"
+        f"    total = m.num_sockets()\n"
+        f"    rows = []\n"
+        f"    for i in range(total):\n"
+        f"        sock = m.get_socket_by_index(i)\n"
+        f"        if sock is None:\n"
+        f"            continue\n"
+        f"        row = {{'index': i,\n"
+        f"               'name': str(sock.get_editor_property('socket_name')),\n"
+        f"               'bone': str(sock.get_editor_property('bone_name'))}}\n"
+        f"        try:\n"
+        f"            loc = sock.get_editor_property('relative_location')\n"
+        f"            row['relative_location'] = [loc.x, loc.y, loc.z]\n"
+        f"        except Exception:\n"
+        f"            row['relative_location'] = None\n"
+        f"        try:\n"
+        f"            rot = sock.get_editor_property('relative_rotation')\n"
+        f"            row['relative_rotation'] = [rot.pitch, rot.yaw, rot.roll]\n"
+        f"        except Exception:\n"
+        f"            row['relative_rotation'] = None\n"
+        f"        rows.append(row)\n"
+        f"    OUT = {{'found': True, 'error': None,\n"
+        f"          'mesh_path': {mesh_path!r},\n"
+        f"          'socket_count': total,\n"
+        f"          'sockets': rows,\n"
+        f"          'sockets_readable': len(rows) == total}}\n"
+    )
+    payload = get_bridge().run_python(guarded(body))
+    if not payload.get("found"):
+        return {"success": False, "error": payload.get("error"),
+                "sockets": [], "socket_count": 0}
+    return {
+        "success": True,
+        "mesh_path": mesh_path,
+        "socket_count": payload.get("socket_count"),
+        "sockets": payload.get("sockets", []),
+        "sockets_readable": payload.get("sockets_readable"),
+    }
+
+
 def set_mesh_lods(
     mesh_path: str,
     percent_triangles: list[float] | None = None,

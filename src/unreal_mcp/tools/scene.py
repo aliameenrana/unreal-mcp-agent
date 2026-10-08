@@ -465,6 +465,61 @@ def set_actor_folder(actor_name: str, folder_path: str) -> dict:
     }
 
 
+def set_actor_label(actor_name: str, new_label: str) -> dict:
+    """
+    Renames an actor in the World Outliner, which is the label a human sees.
+
+    This is the one actor-naming surface that had a getter and no setter:
+    `list_actors` and `get_selected_actors` both read `get_actor_label()`, and
+    nothing wrote one. `set_actor_folder` and `tag_actor` each have both halves.
+
+    Unlike the object name, the label does not have to be unique, so this never
+    fails on a collision. Read-back goes through `get_actor_label()` rather than
+    trusting the setter's return, and the outliner row is what actually changes;
+    Python code that keys off `actor.name` is unaffected.
+    """
+    security.enforce_tier("set_actor_label")
+    if not new_label.strip():
+        return {"success": False, "error": "new_label must not be empty"}
+    actor = find_actor_by_name(actor_name, optional=True)
+
+    body = (
+        f"a = {actor}\n"
+        f"OUT = {{'found': a is not None,\n"
+        f"      'error': None if a is not None else {missing_actor_message(actor_name)},\n"
+        f"      'label_before': str(a.get_actor_label()) if a else None,\n"
+        f"      'label_after': None,\n"
+        f"      'object_name_unchanged': None}}\n"
+        f"if a is not None:\n"
+        f"    object_name = str(a.get_name())\n"
+        f"    a.set_actor_label({new_label!r})\n"
+        f"    OUT['label_after'] = str(a.get_actor_label())\n"
+        f"    OUT['object_name_unchanged'] = str(a.get_name()) == object_name\n"
+    )
+    payload = get_bridge().run_python(guarded(body))
+
+    if not payload.get("found"):
+        return {"success": False, "error": payload.get("error")}
+    before = payload.get("label_before")
+    after = payload.get("label_after")
+    if after != new_label:
+        return {
+            "success": False,
+            "error": f"label did not take: asked for {new_label!r}, "
+                     f"read back {after!r}",
+            "actor_name": actor_name,
+            "label_before": before,
+            "label_after": after,
+        }
+    return {
+        "success": True,
+        "actor_name": actor_name,
+        "label_before": before,
+        "label_after": after,
+        "object_name_unchanged": payload.get("object_name_unchanged"),
+    }
+
+
 def tag_actor(actor_name: str, tags: list[str], remove: list[str] | None = None) -> dict:
     """
     Adds and/or removes tags on an actor. Actor.tags is a Set[str], so ordering

@@ -126,8 +126,21 @@ and setter; labels only have `get_actor_label()`, read via `list_actors`/
 - **Security tier:** `CONSTRUCTIVE`, same tier as `set_actor_folder`/`tag_actor` — renaming
   a label is not destructive or irreversible.
 
-📋 **New primitive from RECIPE_DESIGNS.md:** `get_skeletal_mesh_sockets` —
-see "Socket discovery" subsection under Animation below.
+✅ `get_skeletal_mesh_sockets` — built. See the verification caveat in its
+docstring: both rejection paths and the read loop are confirmed live, but a
+*populated* socket list is not, because this project has no SkeletalMesh asset
+and none can be created from Python. `SkeletalMesh` has `num_sockets()` and
+`get_socket_by_index(i)` but **no `get_all_socket_names`**, which is what
+PLAN.md guessed, and the name lives on `socket_name`, not `name`.
+`SkeletalMeshFromStaticMeshFactory` is the only conversion factory and has no
+settable mesh attribute, so the populated case needs an .fbx the project lacks.
+
+✅ `set_actor_label(actor_name, new_label)` — built and live-verified, closing
+the asymmetry the catalog audit found (labels had a getter and no setter).
+`Actor.set_actor_label(new_actor_label, mark_dirty=True)`; the first argument is
+named `new_actor_label`, not `new_label`. The outliner label does not have to be
+unique, and the Python-side object name is unaffected, which the tool reports as
+`object_name_unchanged`.
 
 ### components.py
 
@@ -520,36 +533,34 @@ one at a time.
 
 ---
 
-## Automation Tests — BUILDABLE, lowest-risk of the new domains
+## Automation Tests — NOT buildable in UE 5.8 (corrected)
 
-Source: https://dev.epicgames.com/documentation/en-us/unreal-engine/python-api/class/PythonTestRunner ,
-https://dev.epicgames.com/documentation/unreal-engine/API/Plugins/AutomationTestToolset/UAutomationTestToolset
+`RESEARCH_NEW_DOMAINS.md` ranked `unreal.PythonTestRunner` first across all eight
+domains it surveyed, on the strength of a docs page. **It does not exist in this
+engine version.** Neither does the `UAutomationTestToolset` AICallable path.
 
-**What's CONFIRMED:**
-- `unreal.PythonTestRunner` — classic Python API, documented. `create()`,
-  `get_tests()`, `run_test()`, `get_last_test_result()`. Goes through the
-  existing pure-Python bridge architecture with zero new infrastructure
-  needed — this is the one domain in the whole report with two independent
-  real paths, and this is the one that needs nothing new.
-- `UAutomationTestToolset` also exists (`DiscoverTests(bool bForceRediscover)`,
-  `ListTests(NameFilter, TagFilter, Limit)`, `RunTests(TestNames)`,
-  `RunTestsByFilter(FilterExpression)`, `GetTestStatus()`, `GetTestResults()`,
-  `StopTests()`) but uses the `UToolsetDefinition`/`AICallable` C++
-  registration pattern — a second integration path alongside Python Remote
-  Execution, new architecture for this project. Defer this half; it's real
-  but not worth building ahead of the pure-Python win above.
+Measured, by the "enumerate, never guess a class list" method rather than by
+guessing names:
 
-**What still needs a live probe:** `PythonTestRunner.create()`'s exact
-argument shape and `run_test()`'s return value shape — not because anything
-here looks doubtful, but because this project's own rule is that no tool
-gets written on docs alone, ever, regardless of how settled a finding looks.
+- `hasattr(unreal, "PythonTestRunner")` is False.
+- `grep -c "^class.*TestRunner\|^class.*Toolset\|^class PythonTest"` over the
+  installed stub returns **0**.
+- There are 7 `Automation`-prefixed classes. Only two are libraries:
+  `AutomationLibrary` and `AutomationUtilsBlueprintLibrary`.
+- `AutomationLibrary`'s whole surface is `add_test_error`, `add_test_info`,
+  `add_test_warning`, `add_test_telemetry_data`, `are_automated_tests_running`
+  and `set_test_telemetry_storage`. It can annotate a test someone else is
+  already running; it cannot start, list or filter one.
+- `AutomationUtilsBlueprintLibrary` exposes no test methods at all.
+- No `*Subsystem` in `dir(unreal)` matches Automation, Test or Script.
 
-**How to build this:** build `PythonTestRunner`-based tooling first — it's
-ranked first across all 8 researched domains precisely because it needs no
-new architecture and has two independent confirmations. Probe
-`create()`/`run_test()` live, then write a thin wrapper following this
-project's usual tool conventions (`guarded()`, independent read-back on
-`get_last_test_result()`).
+So the step-5 verification entry for `run_automation_test` has no call to wrap.
+This is the same failure shape as the Blueprint graph verdict, in the opposite
+direction: a docs page was treated as settled and the live check never ran. The
+"ranked first" claim is the fourth time a curated list in this project has been
+wrong, and the two most recent times were both "available" rather than
+"unavailable".
+
 
 ---
 
