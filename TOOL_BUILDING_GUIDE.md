@@ -303,13 +303,41 @@ in PLAN.md's "Presets" section.
 
 ✅ `execute_python` — the escape hatch, MVP.
 
-### Niagara / VFX — no module yet, all planned
+### Niagara / VFX — instance level built, asset creation blocked
 
-📋 `spawn_niagara_system`, `set_niagara_parameter`,
-`get_niagara_user_parameters`, `create_niagara_system_asset`,
-`add_niagara_emitter_from_template`, `set_niagara_renderer_material` — all
-catalog-only, not built. Instance-level control (spawn/parameterize/assemble)
-is real and buildable; see PLAN.md's Niagara section.
+✅ `spawn_niagara_system`, `set_niagara_parameter`,
+`get_niagara_user_parameters` — all three built and live-verified. Four
+signature mistakes got through, all of which the compile-only snippet audit
+passed:
+
+- `spawn_system_attached` takes a **SceneComponent, not an Actor**, and also
+  wants an attach point name plus an `AttachLocation` enum. Passing the actor
+  gave `TypeError: Failed to convert parameter 'attach_to_component'`.
+- `Actor` has **no `get_root_component`** in the Python API, so
+  `get_components_by_class(SceneComponent)` is the only route to a component.
+- `attach_point_name` rejects Python `None`; it needs `""`, so `socket_name`
+  defaults to an empty string rather than None.
+- The parameter setter is `NiagaraComponent.set_float_parameter` and siblings,
+  **not** `set_variable_*`, which writes instance simulation state instead.
+
+Setting an unexposed parameter is silently ignored by Niagara, so
+`set_niagara_parameter` reads the exposed list first and fails loudly with
+`known_parameters` attached. `get_niagara_user_parameters` had to reach through
+the function library because `NiagaraSystem` exposes no parameter accessor at
+all. Verified against `/Niagara/VectorFields/VectorFieldVisualizationSystem`,
+which has 9 exposed parameters, covering the bool, int, float and vector setters.
+
+🚫 `create_niagara_system_asset` — **not buildable.**
+`NiagaraSystemFactoryNew` accepts `create_asset` and returns a `NiagaraSystem`,
+but the package will not save and `load_asset` returns None afterwards. Engine
+plugin content under `/Niagara` is the only usable source of systems.
+
+🚫 `add_niagara_emitter_from_template` — not buildable. `NiagaraSystem` exposes
+no emitter handle list or adder; `emitter_handles` is unreachable from Python,
+and populating an emitter needs the graph authoring confirmed out of scope below.
+
+🚫 `set_niagara_renderer_material` — not buildable. `NiagaraEmitter` has a
+`renderer_bindings` property and no public accessor for the renderer list.
 
 🚫 Niagara module/script graph authoring (node-by-node) — confirmed not
 buildable, see "Niagara Graph-Level Authoring" below.
