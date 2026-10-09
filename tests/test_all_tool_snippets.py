@@ -128,7 +128,12 @@ DUMMY = {
     "x": 0.0,
     "y": 0.0,
     "new_label": "ZZAudit",
+    "parameter_name": "User.Scale",
+    "value": 1.5,
+    "location": [0.0, 0.0, 100.0],
+    "system_path": "/Niagara/DefaultAssets/DefaultSystem.DefaultSystem",
 }
+
 
 # Per-tool extras, for arguments whose meaning is tool-specific.
 #

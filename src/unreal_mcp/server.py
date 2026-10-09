@@ -191,6 +191,9 @@ mcp.add_tool(_wrap(assets.save_asset))
 
 # Meshes
 mcp.add_tool(_wrap(meshes.get_mesh_bounds))
+mcp.add_tool(_wrap(niagara.get_niagara_user_parameters))
+mcp.add_tool(_wrap(niagara.set_niagara_parameter))
+mcp.add_tool(_wrap(niagara.spawn_niagara_system))
 mcp.add_tool(_wrap(meshes.get_skeletal_mesh_sockets))
 mcp.add_tool(_wrap(meshes.set_mesh_lods))
 mcp.add_tool(_wrap(meshes.get_mesh_collision_info))
