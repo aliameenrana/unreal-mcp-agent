@@ -26,6 +26,7 @@ from .tools import (
     lighting,
     materials,
     meshes,
+    niagara,
     presets,
     python_exec,
     scene,
