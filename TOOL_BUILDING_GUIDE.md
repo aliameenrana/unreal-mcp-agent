@@ -14,6 +14,58 @@ continuing. Everything below refers to patterns established in them.
 
 ---
 
+## TOP PRIORITY — fix these before building any more tools
+
+Two defects sit above the normal tool-building sequence. Neither is a tool, so
+nothing else in this document forces anyone to look at them.
+
+### 1. Nothing tests that the server actually imports and dispatches
+
+`src/unreal_mcp/server.py` had all three Niagara tools registered and no
+`from .tools import niagara`. Every test still passed — 375 of them — while
+`import unreal_mcp.server` raised `NameError` and **every tool was
+unreachable**. The suite exercised tool functions by importing the `tools`
+package directly, so a registration typo or a missing import in `server.py`
+was invisible to it.
+
+This is the worst bug class found so far, because it presents as "tests are
+green" and means the whole bridge is down.
+
+Required fix: a test that imports `unreal_mcp.server` and asserts that a
+handful of representative tools — ideally one per `tools/*.py` module — appear
+in `mcp._tool_manager`. Roughly five lines. Until it exists, treat any
+"registered" claim in this document as unverified.
+
+When adding a tool, check the module is imported as well as registered:
+
+    grep -c "^from .tools import" src/unreal_mcp/server.py   # module list
+    python -c "from unreal_mcp import server; \
+      print(len(server.mcp._tool_manager._tools))"           # must not raise
+
+### 2. `delete_asset` lies, so live tests leak into the level
+
+`EditorAssetLibrary.delete_asset` returns success while the asset stays on
+disk. Seven `ZZ*` entries are sitting in `UnrealProject/Content/MCPTest/`
+right now: `ZZBind1`, `ZZBind318447`, `ZZBpB_ZZBpB`, `ZZDtA`, `ZZT` and
+`ZZVerifySeq` as `.uasset` files, plus a `ZZNiag1791527497` directory left by
+the Niagara system-creation attempt (see the Niagara section — the factory
+creates the package folder even though `save_asset` fails and `load_asset`
+afterwards returns None, so the debris is a directory here rather than an
+asset).
+
+Consequences: every live test adds to this pile and nothing reclaims it, so
+the level gets slower and harder to reason about, and a stale asset can be
+mistaken for something a current test created.
+
+Do not assume a delete worked. After deleting, confirm with
+`EditorAssetLibrary.does_asset_exist`, and if the file is still there either
+call delete again on the next pass or report it. Clean up the existing `ZZ*`
+files before the next live-verification round, and prefer the in-memory route
+(transient objects, `unreal.new_object`) for anything that does not need to
+persist.
+
+---
+
 ## The one rule everything else serves
 
 **Never guess the shape of an Unreal Python API call. Look it up in the
