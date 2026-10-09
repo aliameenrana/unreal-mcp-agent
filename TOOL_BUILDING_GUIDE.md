@@ -31,10 +31,12 @@ was invisible to it.
 This is the worst bug class found so far, because it presents as "tests are
 green" and means the whole bridge is down.
 
-Required fix: a test that imports `unreal_mcp.server` and asserts that a
-handful of representative tools — ideally one per `tools/*.py` module — appear
-in `mcp._tool_manager`. Roughly five lines. Until it exists, treat any
-"registered" claim in this document as unverified.
+**Fixed** in `tests/test_server_registration.py` (commit `c3fa945`). It imports
+`unreal_mcp.server`, checks every `tools/*.py` module is in the import block,
+checks each imported module registers at least one of its own functions, and
+spot-checks named tools. Verified by reintroducing the bug: removing the
+`niagara` import fails 4 of these tests while all 375 others still pass, which
+is exactly the signature of the original outage.
 
 When adding a tool, check the module is imported as well as registered:
 
@@ -57,12 +59,26 @@ Consequences: every live test adds to this pile and nothing reclaims it, so
 the level gets slower and harder to reason about, and a stale asset can be
 mistaken for something a current test created.
 
-Do not assume a delete worked. After deleting, confirm with
-`EditorAssetLibrary.does_asset_exist`, and if the file is still there either
-call delete again on the next pass or report it. Clean up the existing `ZZ*`
-files before the next live-verification round, and prefer the in-memory route
-(transient objects, `unreal.new_object`) for anything that does not need to
-persist.
+Do not assume a delete worked, and do not run `delete_asset` against a path you
+have not just confirmed exists. `delete_asset` returns True for **any**
+package path, including ones the registry has never heard of, so its return
+value carries no information at all. Treat it as fire, not as a tool:
+
+- `Blue.uasset` was destroyed this way. A cleanup pass that meant to touch only
+  `ZZ*` debris called it on `Blue` as a control and the call returned True. The
+  asset was not in git, not in any backup, and not recoverable from the editor.
+  It was rebuilt by hand as a `MaterialInstanceConstant` off `M_VariantBase`
+  with vector parameter `Tint = (0, 0, 1, 1)`, matching its `Green` and `Red`
+  siblings. Any history specific to the original `Blue` is gone.
+- Verify with `does_asset_exist` *before* the call, never after.
+- `EditorAssetLibrary.list_assets` returns **strings** (`'/Game/Path/Name'`),
+  not asset objects. Iterating the result and calling `get_editor_property` on
+  each entry raises `AttributeError`, which `guarded()` turns into a normal
+  error result — so a cleanup loop can silently do nothing and still look like
+  it ran. Split on `.` to get the name.
+- Clean up the remaining `ZZ*` files by removing them from disk. They are not
+  in the asset registry, which is why every programmatic delete has failed on
+  them.
 
 ---
 
