@@ -727,14 +727,60 @@ and serialized to the asset), then remove the character from the subsystem
 when done — a sequence worth wrapping once as a context-manager-style
 helper rather than repeating in every tool.
 
-- `create_metahuman_character` — instantiate a new `MetaHumanCharacter` asset from a preset/template.
-- `set_metahuman_body_type` / `sculpt_metahuman_body` — body conform and blend-space sculpting calls on the editor subsystem.
-- `set_metahuman_face_landmarks` — face sculpting via landmark manipulation, the programmatic equivalent of dragging control points in MetaHuman Creator.
-- `set_metahuman_skin_tone` / `set_metahuman_wardrobe_item` — material/wardrobe assembly calls.
-- `auto_rig_metahuman` — triggers the auto-rig request through the subsystem, this is the step that turns a sculpted character into something animatable.
-- `export_metahuman_to_level` — assembles and places the finished character as an actor, the natural hand-off point back into the rest of this tool set (it's now just an actor `set_actor_transform` etc. can operate on).
-- `batch_generate_metahuman_variants` — the actually-impressive one: given a base template and a list of parameter deltas (skin tone, body type, wardrobe), spit out N distinct characters in one call. This is squarely what the API was built for (batch automation) and is the kind of task that's brutally repetitive by hand.
-- Build this domain after the PIE/verification infrastructure, not before: a MetaHuman tool that silently produces a broken character (bad topology, missing rig) is worse than not having the tool, and the only way to catch that is rendering a viewport screenshot back for inspection.
+Split to per-operation grain below rather than one line per rough category,
+matching Epic's own likely tool granularity for this subsystem (register/
+edit/commit/release is a session lifecycle wrapped around many small calls,
+not one big call per concept).
+
+**Session lifecycle (the register/edit/commit/release wrapper every other call needs):**
+
+- `begin_metahuman_edit_session(character_path)` — registers the character with `MetaHumanCharacterEditorSubsystem` for editing.
+- `commit_metahuman_edit(character_path)` — commits pending changes to viewport + asset.
+- `end_metahuman_edit_session(character_path)` — removes the character from the subsystem.
+
+**Creation and identity:**
+
+- `create_metahuman_character(preset_or_template_path, name)` — instantiate a new `MetaHumanCharacter` asset.
+- `list_metahuman_presets()` — discovery call before picking a template blind.
+- `get_metahuman_character_info(character_path)` — read current body type, skin tone, wardrobe state, rig status.
+
+**Body:**
+
+- `set_metahuman_body_type(character_path, body_type)` — body conform selection.
+- `sculpt_metahuman_body_blendspace(character_path, blend_params)` — blend-space sculpting.
+- `set_metahuman_height(character_path, height_value)`
+
+**Face:**
+
+- `set_metahuman_face_landmarks(character_path, landmark_deltas)` — face sculpting via landmark manipulation, the programmatic equivalent of dragging control points in MetaHuman Creator.
+- `reset_metahuman_face_landmarks(character_path)`
+- `get_metahuman_face_landmarks(character_path)` — read current landmark positions back.
+
+**Skin, wardrobe, texture/assembly:**
+
+- `set_metahuman_skin_tone(character_path, tone_value)`
+- `set_metahuman_skin_detail(character_path, detail_params)` — freckles/blemish/aging sliders, if exposed separately from tone.
+- `set_metahuman_wardrobe_item(character_path, slot, item_path)` — one call per wardrobe slot (top, bottom, shoes, etc.) rather than one generic call, matching how the Creator UI itself is slot-based.
+- `get_metahuman_wardrobe_state(character_path)` — read back what's equipped per slot.
+- `set_metahuman_hair(character_path, hair_grooom_path)`
+
+**Rigging and export:**
+
+- `auto_rig_metahuman(character_path)` — triggers the auto-rig request, turning a sculpted character into something animatable.
+- `get_metahuman_rig_status(character_path)` — read-only check before export, catches "exported with no rig" before it happens silently.
+- `export_metahuman_to_level(character_path, location, rotation)` — assembles and places the finished character as an actor, the hand-off point back into the rest of this tool set (it's now just an actor `set_actor_transform` etc. can operate on).
+
+**Batch:**
+
+- `batch_generate_metahuman_variants(base_template_path, variant_deltas)` — given a base template and a list of parameter deltas (skin tone, body type, wardrobe), produce N distinct characters in one call. This is squarely what the API was built for and is the kind of task that's brutally repetitive by hand; internally this is a loop over the per-operation calls above, not a separate API surface.
+
+Total: roughly **21 tools** at this grain versus the 7 lines previously
+listed. Build this domain after the PIE/verification infrastructure, not
+before: a MetaHuman tool that silently produces a broken character (bad
+topology, missing rig) is worse than not having the tool, and the only way
+to catch that is rendering a viewport screenshot back for inspection. Every
+call above still needs step-2b live confirmation against a project with the
+MetaHuman Character plugin actually enabled — nothing here has been probed.
 
 ### Landscape and foliage
 
@@ -769,12 +815,105 @@ read back through `BlueprintEditorLibrary.list_member_variable_names`, and
 `BlueprintEditorSubsystem` does not exist in this build. Full detail is in
 TOOL_BUILDING_GUIDE.md.
 
-### Sequencer / cinematics
+### Control Rig — planned, not yet built, split to per-operation grain
 
-- `create_level_sequence` — `AssetToolsHelpers` + `LevelSequenceFactoryNew`.
-- `add_actor_to_sequence` / `add_camera_cut_track` — `LevelSequenceEditorBlueprintLibrary`.
-- `add_keyframe` — `MovieSceneSequence` track/section API, for simple agent-driven cutscenes.
-- `render_sequence_to_movie` — `MoviePipelineQueueSubsystem`, genuinely useful output artifact for a build-and-show loop.
+Not previously its own PLAN.md section; findings were only in
+RESEARCH_NEW_DOMAINS.md until now. Real, documented Python surface across
+three distinct controller objects (asset, graph, hierarchy), confirmed richer
+than Blueprint's node API because pins are string-addressed rather than
+opaque handles. All of the below need the standard step-2b live probe before
+any code is written; `print_python_command=True` on the mutating calls is a
+built-in way to reverse-engineer exact call shape from a hand-performed edit
+first, which should make that probe cheap.
+
+**Asset-level (`unreal.ControlRigBlueprint`), 3 tools:**
+
+- `get_control_rig_controller(blueprint_path)` — wraps `get_controller()`, returns the graph controller handle.
+- `get_control_rig_hierarchy_controller(blueprint_path)` — wraps `get_hierarchy_controller()`.
+- `list_available_rig_units(blueprint_path)` — wraps `get_available_rig_units()`, discovery call before adding nodes blind.
+
+**Graph mutation (`unreal.RigVMController`), split by operation rather than one "add_node" catch-all, matching how `material_graph.py` already splits node-type-specific creation:**
+
+- `add_control_rig_unit_node(blueprint_path, script_struct, method_name, position)`
+- `add_control_rig_variable_node(blueprint_path, variable_name, position)`
+- `add_control_rig_comment_node(blueprint_path, text, position)`
+- `add_control_rig_branch_node(blueprint_path, position)`
+- `add_control_rig_if_node(blueprint_path, position)`
+- `add_control_rig_array_node(blueprint_path, position)`
+- `add_control_rig_template_node(blueprint_path, template_name, position)`
+- `add_control_rig_function_reference_node(blueprint_path, function_path, position)`
+- `connect_control_rig_pins(blueprint_path, output_pin_path, input_pin_path)` — wraps `add_link()`, string-addressed pins (`"NodeA.Translation.X"`), no node-selector ambiguity problem material nodes have.
+- `disconnect_control_rig_pin(blueprint_path, pin_path)` — wraps `break_link()`.
+- `disconnect_all_control_rig_pins(blueprint_path, node_name)` — wraps `break_all_links()`.
+- `set_control_rig_pin_default_value(blueprint_path, pin_path, value)`
+- `get_control_rig_pin_default_value(blueprint_path, pin_path)`
+- `add_control_rig_array_pin(blueprint_path, array_pin_path)`
+- `remove_control_rig_array_pin(blueprint_path, array_pin_path)`
+- `remove_control_rig_node(blueprint_path, node_name)` — wraps `remove_node()`.
+- `remove_control_rig_exposed_pin(blueprint_path, pin_name)`
+
+**Hierarchy mutation (`unreal.RigHierarchyController`), 1 tool to start:**
+
+- `add_control_rig_bone(blueprint_path, bone_name, parent_name, transform)` — wraps `add_bone()`. Further hierarchy element types (controls, nulls, curves) are real per the docs but not individually named here yet; add as separate tools per element type when this is actually built, same split-by-operation approach as above rather than one generic `add_hierarchy_element`.
+
+Total: roughly **20 tools** at this grain versus the 3-4 lines the domain
+previously had. Needs live-probe confirmation of `get_controller()`'s exact
+return type and `add_unit_node`'s argument order (two sources disagreed
+slightly) before any of these are written. Source:
+RESEARCH_NEW_DOMAINS.md section 3; docs at
+`python-api/class/RigVMController`, `python-api/class/ControlRigBlueprint`.
+
+### Sequencer / cinematics — drafted once, reverted; split to per-operation grain for the retry
+
+Five tools were written and then reverted (see "Sequencer: drafted,
+deliberately not committed" below) because `add_possessable` deadlocks the
+editor on roughly half its calls. The catalog below is the full target
+surface at Epic-parity grain, split by track/section/binding type rather
+than one generic `add_sequence_track`/`add_sequence_key`, so that whichever
+operations turn out reliable can ship independently instead of an all-or-
+nothing five-tool set blocked on the one broken call.
+
+**Sequence asset lifecycle:**
+
+- `create_level_sequence(path, name)` — `AssetToolsHelpers` + `LevelSequenceFactoryNew`. Previously drafted, behaved in isolation.
+- `get_sequence_info(sequence_path)` — frame range, tick resolution, bound object count. Previously blocked: verification stopped at the first binding because of the `add_possessable` issue below, not because this call itself failed.
+- `set_sequence_playback_range(sequence_path, start_frame, end_frame)`
+- `set_sequence_frame_rate(sequence_path, frame_rate)`
+
+**Bindings (the broken one, named precisely rather than folded into a generic step):**
+
+- `add_possessable(sequence_path, actor_name)` — **🚫 confirmed, never call.** Hard-deadlocks the editor's game thread (not flaky, measured: `ps` shows ~46% CPU spinning, no RPC, no window list, only recovery is restarting the editor). Same failure on `LevelSequence.add_possessable`, `MovieSceneSequenceExtensions.add_possessable`, with and without `save_asset`. See TOOL_BUILDING_GUIDE.md's "add_possessable hard-hangs the editor" section.
+- `add_spawnable_from_class(sequence_path, class_path)` — **🚫 confirmed, same deadlock.** `LevelSequenceEditorSubsystem.add_spawnable_from_class` fails identically to `add_possessable`; this is not an untried alternative, it was measured and hangs the same way. Any binding tool needs a different approach entirely or stays unbuilt.
+- `remove_binding(sequence_path, binding_id)` — depends on being able to create a binding in the first place; blocked transitively.
+- `list_sequence_bindings(sequence_path)` — this one is actually usable: `get_bindings()`/`get_possessables()`/`get_spawnables()`/`find_binding_by_name()` all measured working on an already-bound sequence loaded from disk. Only creating new bindings is blocked, not reading existing ones.
+
+**Tracks and sections, split per track type rather than generic:**
+
+- `add_camera_cut_track(sequence_path)` — `LevelSequenceEditorBlueprintLibrary`.
+- `add_transform_track(sequence_path, binding_id)`
+- `add_transform_keyframe(sequence_path, binding_id, frame, location, rotation, scale)` — previously drafted as generic `add_sequence_key`; split here since a transform key's payload shape differs from a property key's.
+- `add_property_track(sequence_path, binding_id, property_name)`
+- `add_property_keyframe(sequence_path, binding_id, property_name, frame, value)`
+- `add_audio_track(sequence_path, sound_cue_path, start_frame)`
+- `add_event_track(sequence_path, binding_id)`
+- `add_event_keyframe(sequence_path, binding_id, frame, event_name)`
+- `remove_track(sequence_path, track_id)`
+
+**Playback and output:**
+
+- `play_sequence_in_editor(sequence_path)` — `LevelSequenceEditorBlueprintLibrary.play`, PIE-adjacent verification path.
+- `render_sequence_to_movie(sequence_path, output_path, settings)` — `MoviePipelineQueueSubsystem`.
+
+Total: roughly **17 tools** at this grain versus the 4 lines previously
+listed. Binding creation (`add_possessable`/`add_spawnable_from_class`) is
+confirmed broken, not merely risky — it deadlocks the editor and the only
+recovery is a restart, so neither should ever be called from this bridge.
+Every track/keyframe tool above needs a binding to attach to, so the whole
+domain is transitively blocked until a non-deadlocking way to create a
+binding is found, which is not currently known. `list_sequence_bindings`
+and the four asset-lifecycle tools are the only parts usable today, and
+only against a sequence that already has bindings created by hand in the
+editor, not by this bridge.
 
 ### UMG / UI
 

@@ -358,9 +358,23 @@ TOOL_RISK_TIERS: dict[str, RiskTier] = {
     "get_current_level": RiskTier.READ_ONLY,
     "load_level": RiskTier.DESTRUCTIVE,
     "save_level": RiskTier.DESTRUCTIVE,
+    # asset_ops: rename/move/duplicate can invalidate references or overwrite
+    "rename_asset": RiskTier.DESTRUCTIVE,
+    "move_asset": RiskTier.DESTRUCTIVE,
+    "duplicate_asset": RiskTier.DESTRUCTIVE,
     "new_level": RiskTier.DESTRUCTIVE,
     "delete_actor": RiskTier.DESTRUCTIVE,
     "delete_asset": RiskTier.DESTRUCTIVE,
+    "list_assets_in_path": RiskTier.READ_ONLY,
+    "get_asset_referencers": RiskTier.READ_ONLY,
+    "get_asset_dependencies": RiskTier.READ_ONLY,
+    "import_sound_wave": RiskTier.READ_ONLY,
+    "create_sound_cue": RiskTier.READ_ONLY,
+    "play_sound_at_location": RiskTier.READ_ONLY,
+    "create_sound_attenuation": RiskTier.READ_ONLY,
+    "create_widget_blueprint": RiskTier.READ_ONLY,
+    "add_foliage_type": RiskTier.READ_ONLY,
+    "paint_foliage_instances": RiskTier.READ_ONLY,
     "execute_python": RiskTier.SYSTEM,  # gated separately via check_python_code, not blocked outright
 }
 

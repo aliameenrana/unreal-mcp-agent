@@ -11,6 +11,8 @@ from mcp.server.mcpserver import MCPServer
 
 from .security import SecurityViolation
 from .tools import (
+    asset_ops,
+    audio,
     data_tables,
     replication,
     animation,
@@ -23,6 +25,7 @@ from .tools import (
     physics,
     play,
     textures,
+    landscape,
     lighting,
     materials,
     meshes,
@@ -30,6 +33,7 @@ from .tools import (
     presets,
     python_exec,
     scene,
+    umg,
 )
 
 mcp = MCPServer(
@@ -237,3 +241,35 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
+# Asset operations (list, rename, move, duplicate, reference/dependency queries)
+for _fn in (
+    asset_ops.list_assets_in_path,
+    asset_ops.rename_asset,
+    asset_ops.move_asset,
+    asset_ops.duplicate_asset,
+    asset_ops.get_asset_referencers,
+    asset_ops.get_asset_dependencies,
+):
+    mcp.add_tool(_wrap(_fn))
+
+# Audio
+for _fn in (
+    audio.import_sound_wave,
+    audio.create_sound_cue,
+    audio.play_sound_at_location,
+    audio.create_sound_attenuation,
+):
+    mcp.add_tool(_wrap(_fn))
+
+# UMG
+for _fn in (
+    umg.create_widget_blueprint,
+):
+    mcp.add_tool(_wrap(_fn))
+
+# Landscape and foliage (foliage only; landscape sculpting has no Python surface)
+for _fn in (
+    landscape.add_foliage_type,
+    landscape.paint_foliage_instances,
+):
+    mcp.add_tool(_wrap(_fn))

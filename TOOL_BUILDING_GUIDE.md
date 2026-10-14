@@ -147,6 +147,119 @@ distinct from `create_material_function` the asset-scaffolder) lives in
 here, trust the file, not PLAN.md's section grouping, if the two disagree
 on where something lives.
 
+### asset_ops.py (asset management, added after the Blue.uasset incident)
+
+Built and live-probed. `delete_asset` is **not** here; it stays in `assets.py`.
+
+✅ `list_assets_in_path`, `duplicate_asset`, `get_asset_referencers`,
+`get_asset_dependencies`
+
+📋 `rename_asset`, `move_asset` — implemented, and **not live-verifiable**.
+`EditorAssetLibrary.rename_asset` returns False and leaves the asset exactly
+where it was, on a freshly created and saved asset, with no held reference.
+`EditorAssetSubsystem.rename_asset` behaves identically, and
+`AssetTools.rename_assets` fails argument conversion. Three routes, one
+outcome, so this is an engine refusal rather than a wrong call shape. Both
+tools report `success: false` honestly rather than claiming the rename.
+
+Two facts the tests depend on:
+
+- `EditorAssetLibrary.list_assets` returns **strings**, not asset objects. Split
+  on `.` for the asset name. Calling `get_editor_property` on an element raises
+  `AttributeError`, which `guarded()` converts to a normal error result -- so a
+  loop written that way silently does nothing.
+- `AssetRegistry.get_referencers` / `get_dependencies` take a **package name**
+  (no object suffix) and an `AssetRegistryDependencyOptions`. This is the only
+  blast-radius view available, and it is on-disk references only. Verified
+  against real content: `M_VariantBase` correctly reports its three instances.
+
+🚫 `fix_up_redirectors` — `RedirectorFixer` and `fixup_redirectors` have zero
+occurrences in the 5.8 stub. Not buildable, and it matters here: since rename
+is refused, moves cannot leave redirectors behind, but when rename does work
+elsewhere this will be the gap.
+
+### audio.py
+
+✅ `import_sound_wave`, `create_sound_cue`, `play_sound_at_location`,
+`create_sound_attenuation`
+
+PLAN.md names four tools; three of its claims did not survive contact with 5.8.
+
+- There is no `SoundWaveFactory`. The import factory is **`SoundFactory`**
+  (AudioEditor module). `SoundFactoryFactoryNew` does not exist either; the
+  attenuation factory is `SoundAttenuationFactory`.
+- **`AssetImportTask.destination_path` is a folder, not an asset path**, and
+  the imported asset takes the *source file's* stem. Passing a full asset path
+  nests it at `/Game/Folder/Name/Name`. `import_sound_wave` therefore takes
+  `destination_folder` and returns the real `asset_path`.
+- A wave **cannot be wired into a cue from Python at all**. In 5.8
+  `SoundNodeWavePlayer` exposes exactly one Python-visible member,
+  `child_nodes`, and `SoundCue` has no `add_node`. So `create_sound_cue` takes
+  no wave argument -- an argument that silently did nothing would be worse than
+  its absence -- and returns `has_nodes`, which is False for a fresh cue.
+  Populate nodes in the Sound Cue editor.
+
+### Attenuation lives on a separate asset, not on the sound
+
+PLAN.md's `set_sound_attenuation_settings` assumed a sound asset carries its
+own attenuation. It does not: `SoundWave` and `SoundCue` expose **no**
+attenuation property in Python (checked `dir()` -- the only match is
+`post_attenuation_bus_sends`). `SoundAttenuation` does, via `attenuation`,
+which is a `SoundAttenuationSettings`.
+
+So the tool is **`create_sound_attenuation`**, targeting the attenuation asset,
+which is the only editable surface. Inside it the inner radius is
+**`omni_radius`** -- there is no property named `inner_radius` -- and the
+falloff is `falloff_distance`. Live-verified by write-then-read.
+
+`GameplayStatics.play_sound_at_location` takes `concurrency_settings` as a
+`SoundConcurrency` **object**; passing a bool raises a nativization TypeError.
+Pass `None`.
+
+### umg.py — one tool survived contact
+
+✅ `create_widget_blueprint`
+
+📋 `set_widget_text`, `set_widget_visibility`, `add_widget_to_viewport` -- all
+three built, live-probed, and removed.
+
+- A freshly created Widget Blueprint's generated class exposes **no properties
+  at all**. `visibility`, `render_transform` and `color_and_opacity` all raise
+  "Failed to find property", because an empty blueprint has no root widget to
+  own them. The setters cannot succeed against an empty blueprint.
+- Reaching an authored widget tree is a separate problem with no Python route
+  found, so they cannot succeed against a full one either.
+- `unreal` in this build has no `WidgetBlueprintLibrary` attribute at all
+  (absent from the stub too, confirmed by probing), so there is no way to
+  instantiate a widget and add it to a viewport.
+
+`create_widget_blueprint` is verified: creates the asset, and reports
+`parent_resolved` honestly when a `parent_class` string did not resolve to a
+loaded class.
+
+### landscape.py — foliage only
+
+✅ `add_foliage_type`
+
+✅-but-unverified `paint_foliage_instances` -- and it says so in its own return
+value: `verified` is **always False**. The real signature is
+`add_instances(world_context_object, foliage_type, transforms) -> None` (note:
+`Array[Transform]`, not points plus radius), it returns nothing, and
+`InstancedFoliageActor` exposes no instance-count or foliage-list getter at
+all -- only `add_instances` and `remove_all_instances`. So `called: true` means
+the engine call was made and nothing more. Confirm placement visually.
+
+`FoliageType_InstancedStaticMesh` has no `align_to_surface_normal`; the
+property is **`align_to_normal`**.
+
+🚫 `sculpt_landscape_heightmap`, `paint_landscape_layer` -- **not buildable**.
+`LandscapeEditorObject`, `LandscapeInfo`, `LandscapeEditorSubsystem` and
+`FoliageEditorSubsystem` all have **zero occurrences** in the 5.8 stub.
+`LandscapeComponent` and `LandscapeBrushParameters` exist, but there is
+nothing to construct either from or hand either to. This is a stub-level
+absence, not a cautious judgement call, and it also kills the `.ff` import
+workaround, which needs a subsystem to apply it.
+
 ### scene.py (actors and scene graph)
 
 ✅ `spawn_actor`, `list_actors`, `get_scene_state`, `set_actor_transform`,
@@ -432,25 +545,57 @@ check on `spawn_hud`.
 genuinely unavailable, no Subsystem/Library/Editor/Utils entry point exists
 anywhere across all 44 live Landscape classes. See "Corrected survey" below.
 
-### Sequencer / cinematics — no module yet
+### Sequencer / cinematics — no module yet, split to 17 tools in PLAN.md
 
-📋 `create_level_sequence`, `add_actor_to_sequence`/`add_camera_cut_track`,
-`add_keyframe`, `render_sequence_to_movie` — tracks/sections/keyframing are
-real and drafted; binding tools are not.
+📋 `create_level_sequence`, `get_sequence_info`, `set_sequence_playback_range`,
+`set_sequence_frame_rate`, `list_sequence_bindings` (reads existing bindings
+only), `add_camera_cut_track`, `add_transform_track`/`add_transform_keyframe`,
+`add_property_track`/`add_property_keyframe`, `add_audio_track`,
+`add_event_track`/`add_event_keyframe`, `remove_track`,
+`play_sequence_in_editor`, `render_sequence_to_movie` — tracks, sections,
+keyframing, and reading bindings that already exist are real and either
+drafted or buildable. Full per-tool spec in PLAN.md's "Sequencer /
+cinematics" section.
 
-🚫 `add_possessable`/`add_spawnable_from_class` — hard-hangs the editor's
-game thread, confirmed by repeated measurement. Never call. See
-"add_possessable hard-hangs the editor" below.
+🚫 `add_possessable`/`add_spawnable_from_class`/`remove_binding` — hard-hangs
+the editor's game thread, confirmed by repeated measurement, not flaky.
+Never call either binding-creation path. Since every track/keyframe tool
+needs a binding to attach to, the whole domain is transitively blocked on
+creating new bindings; only reading bindings already created by hand in the
+editor works. See "add_possessable hard-hangs the editor" below.
 
-### MetaHuman — no module yet
+### MetaHuman — no module yet, split to 21 tools in PLAN.md
 
-📋 Entire domain catalogued in PLAN.md, deliberately deferred until PIE
-screenshot infrastructure exists.
+📋 Session lifecycle (`begin_metahuman_edit_session`/`commit_metahuman_edit`/
+`end_metahuman_edit_session`), creation/identity (`create_metahuman_character`,
+`list_metahuman_presets`, `get_metahuman_character_info`), body
+(`set_metahuman_body_type`, `sculpt_metahuman_body_blendspace`,
+`set_metahuman_height`), face (`set_metahuman_face_landmarks`,
+`reset_metahuman_face_landmarks`, `get_metahuman_face_landmarks`), skin/
+wardrobe (`set_metahuman_skin_tone`, `set_metahuman_skin_detail`,
+`set_metahuman_wardrobe_item`, `get_metahuman_wardrobe_state`,
+`set_metahuman_hair`), rig/export (`auto_rig_metahuman`,
+`get_metahuman_rig_status`, `export_metahuman_to_level`), and
+`batch_generate_metahuman_variants` — full domain catalogued at per-operation
+grain in PLAN.md's "MetaHuman" section, deliberately deferred until PIE
+screenshot infrastructure exists (a silently broken character is worse than
+no tool, and only a screenshot catches bad topology/missing rig).
 
-### Control Rig — new domain, no module yet
+### Control Rig — new domain, no module yet, split to 21 tools in PLAN.md
 
-📋 `unreal.ControlRigBlueprint`/`RigVMController`/`RigHierarchyController` —
-BUILDABLE. See dedicated "Control Rig" section below.
+📋 Asset-level (`get_control_rig_controller`, `get_control_rig_hierarchy_controller`,
+`list_available_rig_units`), graph mutation split by node type
+(`add_control_rig_unit_node`, `_variable_node`, `_comment_node`,
+`_branch_node`, `_if_node`, `_array_node`, `_template_node`,
+`_function_reference_node`), linking (`connect_control_rig_pins`,
+`disconnect_control_rig_pin`, `disconnect_all_control_rig_pins`), pin values
+(`set_control_rig_pin_default_value`, `get_control_rig_pin_default_value`,
+`add_control_rig_array_pin`, `remove_control_rig_array_pin`), removal
+(`remove_control_rig_node`, `remove_control_rig_exposed_pin`), and hierarchy
+(`add_control_rig_bone`) — BUILDABLE. Full per-tool spec in PLAN.md's
+"Control Rig" section; see also the dedicated "Control Rig" narrative
+section below for the sourcing and the open signature question on
+`add_unit_node`.
 
 ### Automation Tests — new domain, no module yet
 
