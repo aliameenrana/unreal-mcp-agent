@@ -434,3 +434,114 @@ def _run_texture_import(
         "compression": payload.get("compression"),
         "error": payload.get("error") or (None if payload.get("asset_path") else "Import produced no asset."),
     }
+
+
+def get_child_instances(material_path: str) -> dict:
+    """
+    Lists the material instances whose parent is `material_path`.
+
+    Read-only, and worth having before a material edit: changing a parent's
+    parameters silently changes every instance beneath it, and
+    `MaterialEditingLibrary.get_child_instances` is the only way to see them
+    from Python. It returns **AssetData**, not loaded objects -- calling
+    `get_name()` on a result element raises, so the name and package are read
+    as editor properties instead.
+    """
+    security.enforce_tier("get_child_instances")
+    body = (
+        f"_mat = {UNREAL}.load_object(None, {material_path!r})\n"
+        f"OUT = {{'found': False, 'path': {material_path!r}, 'children': [], 'count': 0}}\n"
+        f"if _mat is None:\n"
+        f"    OUT['error'] = 'no asset at ' + {material_path!r}\n"
+        f"else:\n"
+        f"    for _c in {UNREAL}.MaterialEditingLibrary.get_child_instances(_mat):\n"
+        f"        _n = str(_c.get_editor_property('asset_name'))\n"
+        f"        _pkg = str(_c.get_editor_property('package_name'))\n"
+        f"        OUT['children'].append({{'name': _n, 'path': _pkg + '.' + _n}})\n"
+        f"    OUT['count'] = len(OUT['children'])\n"
+        f"    OUT['found'] = True\n"
+    )
+    payload = get_bridge().run_python(guarded(body))
+    if not payload.get("found"):
+        return {
+            "success": False,
+            "path": material_path,
+            "error": payload.get("error"),
+            "children": [],
+            "count": 0,
+        }
+    return {
+        "success": True,
+        "path": material_path,
+        "children": payload.get("children", []),
+        "count": payload.get("count", 0),
+    }
+
+
+def import_asset(
+    source_file: str,
+    destination_folder: str,
+    asset_type: str = "auto",
+    replace_existing: bool = True,
+) -> dict:
+    """
+    Generic single-file importer: picks a factory from the file suffix and
+    imports through one `AssetImportTask`.
+
+    `asset_type` is `auto`, `static_mesh`, `skeletal_mesh`, `sound`, or
+    `texture`. `auto` reads the suffix, which is right for the common cases;
+    naming the type explicitly is the way out when a file has no useful
+    extension.
+
+    `destination_folder` is a **folder**, not an asset path, and the imported
+    asset takes the source file's stem -- passing a full path here nests it at
+    `/Game/Folder/Name/Name`. The real path comes back as `asset_path`.
+    """
+    security.enforce_tier("import_asset")
+    body = (
+        f"_stem = {source_file!r}.rsplit('/', 1)[-1].rsplit('.', 1)[0]\n"
+        f"_lower = {source_file!r}.lower()\n"
+        f"_kind = {asset_type!r}\n"
+        f"if _kind == 'auto':\n"
+        f"    if _lower.endswith(('.fbx', '.obj')):\n"
+        f"        _kind = 'static_mesh'\n"
+        f"    elif _lower.endswith(('.wav', '.mp3', '.ogg')):\n"
+        f"        _kind = 'sound'\n"
+        f"    elif _lower.endswith(('.png', '.jpg', '.jpeg', '.tga', '.bmp')):\n"
+        f"        _kind = 'texture'\n"
+        f"    else:\n"
+        f"        _kind = 'unsupported'\n"
+        f"_factories = {{'static_mesh': 'StaticMeshFactory', 'skeletal_mesh': 'SkeletalMeshFactory', 'sound': 'SoundFactory', 'texture': 'TextureFactory'}}\n"
+        f"_factory_name = _factories[_kind] if _kind != 'unsupported' else None\n"
+        f"OUT = {{'imported': False, 'kind': _kind, 'requested_folder': {destination_folder!r}, 'asset_path': None}}\n"
+        f"if _kind == 'unsupported':\n"
+        f"    OUT['error'] = 'unrecognised file extension on ' + {source_file!r}\n"
+        f"else:\n"
+        f"    _factory = getattr({UNREAL}, _factory_name)()\n"
+        f"    if hasattr(_factory, 'auto_create_cue'):\n"
+        f"        _factory.set_editor_property('auto_create_cue', False)\n"
+        f"    _task = {UNREAL}.AssetImportTask()\n"
+        f"    _task.set_editor_property('filename', {source_file!r})\n"
+        f"    _task.set_editor_property('destination_path', {destination_folder!r})\n"
+        f"    _task.set_editor_property('automated', True)\n"
+        f"    _task.set_editor_property('replace_existing', {bool(replace_existing)!r})\n"
+        f"    _task.set_editor_property('save', True)\n"
+        f"    _task.set_editor_property('factory', _factory)\n"
+        f"    {UNREAL}.AssetToolsHelpers.get_asset_tools().import_asset_tasks([_task])\n"
+        f"    _got = list({UNREAL}.EditorAssetLibrary.list_assets({destination_folder!r}, True, True))\n"
+        f"    _hit = [q for q in _got if q.rsplit('.', 1)[-1] == _stem]\n"
+        f"    _real = _hit[0] if _hit else None\n"
+        f"    _loaded = {UNREAL}.EditorAssetLibrary.load_asset(_real) if _real else None\n"
+        f"    OUT['imported'] = _loaded is not None\n"
+        f"    OUT['asset_path'] = _real\n"
+        f"    OUT['class'] = str(_loaded.get_class().get_name()) if _loaded else None\n"
+    )
+    payload = get_bridge().run_python(guarded(body))
+    return {
+        "success": bool(payload.get("imported")),
+        "asset_type": payload.get("kind"),
+        "asset_path": payload.get("asset_path"),
+        "destination_folder": destination_folder,
+        "class": payload.get("class"),
+        "error": payload.get("error"),
+    }

@@ -623,6 +623,55 @@ grain in PLAN.md's "MetaHuman" section, deliberately deferred until PIE
 screenshot infrastructure exists (a silently broken character is worse than
 no tool, and only a screenshot catches bad topology/missing rig).
 
+### Three more built; three more built-then-removed
+
+✅ `get_level_info`, `get_child_instances`, `import_asset`
+
+`get_level_info` computes bounds from actor component locations rather than
+reading them, because no level-bounds API is exposed. It caps at 500 measured
+components and reports `truncated`, because this level has 142 actors and an
+unbounded walk is slow. `EditorActorSubsystem` must be reached with
+`get_editor_subsystem(...)`; instantiating it directly gives "descriptor
+'get_all_level_actors' needs an argument".
+
+`get_child_instances` returns **AssetData**, not loaded objects -- calling
+`get_name()` on a result element raises, so name and package are read as editor
+properties. Verified: `M_VariantBase` correctly reports Blue, Green and Red.
+
+`import_asset` is the generic single-file dispatcher. `destination_folder` is a
+folder, not an asset path, and the asset takes the source stem -- same trap as
+`import_sound_wave`. Auto-detect reads the suffix; an unrecognised extension must
+not reach the factory lookup, which is a dict index and raises `KeyError` before
+`OUT` is ever assigned, producing an uncaught local error rather than a tool
+result.
+
+🚫 `stream_level` — built, then **removed.** `EditorLevelUtils.add_level_to_world`
+fails in this build; the call returns a falsy ReturnValue carrying only
+`DeprecationWarning: ... Editor Scripting Utilities Plugin is deprecated`. The
+stub still advertises the function, so this is a stub-vs-runtime mismatch rather
+than a missing API. Without `add` the tool can only ever fail, and
+`set_level_visibility` / `remove_level_from_world` have nothing to act on in a
+single-level world.
+
+Note `add_level_to_world`'s third argument is a `LevelStreaming` **class**
+(`LevelStreamingAlwaysLoaded`), not a bool -- found only after the bool guess
+failed.
+
+🚫 `set_actor_parent_component` — built, then **removed.** `Actor.attach_to_component`
+resolves with the right argument types (three `AttachmentRule` enums, socket as
+`""`), raises nothing, and returns `None`; `get_attach_parent_actor()` stays
+`None` afterwards, across two different actors in the same level. It silently
+does not attach, so there is no success condition to report and no read-back
+that could confirm it. All three rules must be `AttachmentRule` enums -- passing
+a bool fails conversion on the second one, and the socket must be `""` not
+`None`.
+
+📋 `set_actor_network_relevancy` — **not buildable.** `always_relevant`,
+`only_relevant_to_owner`, `net_cull_distance_squared` and the rest are readable
+on an actor but raise "cannot be edited on instances" through
+`set_editor_property`, the same wall documented for `bReplicates`. There are no
+dedicated setters for them.
+
 ### Replication variable mode, screenshots, LODs — three more wrong guesses
 
 ✅ `set_property_replication`, `verify_replication_setup`,

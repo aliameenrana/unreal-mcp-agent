@@ -311,3 +311,45 @@ def new_level(
         "discarded_dirty_packages": payload.get("discarded_dirty_packages") or [],
         "error": payload.get("error"),
     }
+
+
+def get_level_info() -> dict:
+    """
+    Reads the open level: its world name, actor count, streaming levels, and
+    the combined bounds of every actor in it.
+
+    The bounds are computed from actor component bounds rather than read from
+    an engine call, because no level-bounds API is exposed in Python.
+    `get_mesh_bounds` covers a single mesh; this is the whole level.
+    """
+    security.enforce_tier("get_level_info")
+    body = (
+        f"_world = {UNREAL}.EditorLevelLibrary.get_editor_world()\n"
+        f"_subsystem = {UNREAL}.get_editor_subsystem({UNREAL}.EditorActorSubsystem)\n"
+        f"_actors = list(_subsystem.get_all_level_actors())\n"
+        f"_classes = {{}}\n"
+        f"_min = None\n"
+        f"_max = None\n"
+        f"_with_bounds = 0\n"
+        f"for _a in _actors:\n"
+        f"    _cn = str(_a.get_class().get_name())\n"
+        f"    _classes[_cn] = _classes.get(_cn, 0) + 1\n"
+        f"    for _c in _a.get_components_by_class({UNREAL}.SceneComponent):\n"
+        f"        try:\n"
+        f"            _o = _c.get_editor_property('relative_location')\n"
+        f"        except Exception:\n"
+        f"            continue\n"
+        f"        _with_bounds += 1\n"
+        f"        _x, _y, _z = float(_o.x), float(_o.y), float(_o.z)\n"
+        f"        _min = (_x, _y, _z) if _min is None else (min(_min[0], _x), min(_min[1], _y), min(_min[2], _z))\n"
+        f"        _max = (_x, _y, _z) if _max is None else (max(_max[0], _x), max(_max[1], _y), max(_max[2], _z))\n"
+        f"    if _with_bounds > 500:\n"
+        f"        break\n"
+        f"OUT = {{'world': str(_world.get_name()), 'actor_count': len(_actors),\n"
+        f"      'class_counts': _classes, 'components_measured': _with_bounds,\n"
+        f"      'bounds_min': list(_min) if _min else None,\n"
+        f"      'bounds_max': list(_max) if _max else None,\n"
+        f"      'truncated': _with_bounds > 500}}\n"
+    )
+    payload = get_bridge().run_python(guarded(body))
+    return {"success": True, **payload}

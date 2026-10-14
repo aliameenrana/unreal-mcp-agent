@@ -391,6 +391,9 @@ TOOL_RISK_TIERS: dict[str, RiskTier] = {
     "set_blueprint_parent_class": RiskTier.CONSTRUCTIVE,
     "create_game_mode": RiskTier.CONSTRUCTIVE,
     "set_default_game_mode": RiskTier.CONSTRUCTIVE,
+    "get_level_info": RiskTier.READ_ONLY,
+    "get_child_instances": RiskTier.READ_ONLY,
+    "import_asset": RiskTier.CONSTRUCTIVE,
     "execute_python": RiskTier.SYSTEM,  # gated separately via check_python_code, not blocked outright
 }
 

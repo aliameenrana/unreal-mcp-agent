@@ -156,6 +156,11 @@ PER_TOOL = {
     "delete_blueprint_nodes": {"confirm": True},
     # Reparenting needs a real parent class path or the snippet resolves to None.
     "set_blueprint_parent_class": {"parent_class": "/Script/Engine.Actor"},
+    # A real file path and folder, so the auto-detect branch resolves a factory
+    # instead of falling through to the unsupported case.
+    "import_asset": {"source_file": "/tmp/ZZaudit.png",
+                     "destination_folder": "/Game/MCPTest",
+                     "asset_type": "texture"},
 }
 
 # A payload shaped like a real editor reply. Tools read specific keys out of it
