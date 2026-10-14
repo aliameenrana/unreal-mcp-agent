@@ -623,6 +623,69 @@ grain in PLAN.md's "MetaHuman" section, deliberately deferred until PIE
 screenshot infrastructure exists (a silently broken character is worse than
 no tool, and only a screenshot catches bad topology/missing rig).
 
+### Replication variable mode, screenshots, LODs — three more wrong guesses
+
+✅ `set_property_replication`, `verify_replication_setup`,
+`set_blueprint_parent_class`, `create_game_mode`, `set_default_game_mode`
+
+**Replication mode is an enum, not a bool.**
+`BlueprintEditorLibrary.set_blueprint_variable_replication` takes a
+`BlueprintVariableReplication` — `NONE` / `REPLICATED` / `REP_NOTIFY` — and
+passing `True` raises "Cannot nativize 'bool' as 'Replication'". There is no
+`NetMulticast` or `DOREPLIFETIME` in this build. Verified: a variable walks
+`NONE -> REPLICATED -> REP_NOTIFY -> NONE` with read-back each time. That setter
+also auto-creates the `OnRep_` function, which is why there is no
+`add_rep_notify_function` tool -- asking for one would ask for something the
+setter already did.
+
+**`verify_replication_setup` has to filter.** `list_member_variable_names`
+returns every inherited engine variable, fully qualified as
+`/Script/Engine.Actor.bReplicates`; on a plain Actor Blueprint that is 116 rows,
+none of them the caller's. Anything containing a dot is skipped, and
+`inherited_skipped` reports the count. A variable counts as replicating only
+when its mode is not `NONE` -- checking `is not None` counts all 116 as
+replicating, because `NONE` is an enum value rather than a null.
+
+Replication only takes on a Blueprint-**defined** variable. Setting it on a
+native one such as `bReplicates` runs without error and stays `NONE`, which
+looks like a silent no-op. There is also no `EdGraphPinType` property
+exposure, so typed variables cannot be created through
+`add_member_variable`; use the existing `add_blueprint_member_variable`.
+
+**`create_game_mode` needs two corrections.** The parent must be a **full class
+path** — the bare name `GameModeBase` does not resolve through `load_object`.
+And `create_blueprint_asset_with_parent(asset_path, parent_class)` takes two
+arguments, not four: there is no name/folder/type split and no
+`BlueprintType.BP_TYPE_None` (the enum is `BPTYPE_NORMAL` and so on).
+
+**`set_default_game_mode` goes through `WorldSettings`.** There is no
+`ProjectSettings` class in this build's Python API at all, so this is a
+per-level setting rather than a project-wide one. Verified `None -> ZZGameMode_C`
+on the level's `WorldSettings.default_game_mode`; it saves the current level, so
+the level is written when this runs.
+
+📋 `capture_viewport_screenshot` — built, API call confirmed, **output never
+produced in this session.** `AutomationLibrary.take_high_res_screenshot`
+returns an `AutomationEditorTask`: it queues the capture and does not wait. The
+tool retries for six seconds and reports `written: None`, `success: False`,
+which is the honest result — no PNG appears on disk. `Saved/AutoScreenshot.png`
+is stale, not from these calls. A rendering viewport appears to be needed, which
+this editor session does not have.
+
+Two things that looked like tool bugs but are not:
+`EditorAssetLibrary.does_asset_exist` only answers for `/Game/` content paths,
+so calling it on an absolute filesystem path returns False and reads as a failed
+capture every time; the tool checks the filesystem itself instead.
+
+📋 `generate_lods` — built, then **removed.** `EditorStaticMeshLibrary.set_lods`
+needs `StaticMeshReductionOptions` and the LOD screen sizes come from
+`set_lod_screen_sizes`, which is **not on this class at all**. With no way to
+configure screen sizes from Python the rebuild has nothing to work from: on a
+duplicated `BasicShapes/Cube` the call ran clean and `get_lod_count` stayed at
+1, before and after. A tool that always reports failure is worse than none, so
+it is not shipped. `set_lod_build_settings` does exist but takes a
+`MeshBuildSettings` per LOD index that Python cannot usefully populate.
+
 ### A cluster of "planned" domains that turned out to be unreachable
 
 📋 `create_enum_asset` / `create_struct_asset` — **not buildable.**

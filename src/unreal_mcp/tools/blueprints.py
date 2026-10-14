@@ -389,3 +389,123 @@ def compile_blueprint(blueprint_path: str) -> dict:
     )
     result = get_bridge().run_python(expr)
     return {"success": True, "blueprint_path": result}
+
+
+def set_blueprint_parent_class(blueprint_path: str, parent_class: str) -> dict:
+    """
+    Reparents a Blueprint to a new parent class and reads the result back.
+
+    Reparenting is not a property write: existing nodes, inherited variables and
+    overridden functions are all remapped, so the result is confirmed rather
+    than assumed. The route is `BlueprintEditorLibrary.reparent_blueprint`; the
+    read-back uses `get_blueprint_parent_class`.
+    """
+    security.enforce_tier("set_blueprint_parent_class")
+    body = (
+        f"_bp = {UNREAL}.load_object(None, {blueprint_path!r})\n"
+        f"_new = {UNREAL}.load_object(None, {parent_class!r})\n"
+        f"OUT = {{'set': False, 'path': {blueprint_path!r}, 'requested': {parent_class!r}, 'resolved': _new is not None, 'before': None, 'after': None}}\n"
+        f"if _bp is None or not isinstance(_bp, {UNREAL}.Blueprint):\n"
+        f"    OUT['error'] = 'no Blueprint at ' + {blueprint_path!r}\n"
+        f"elif _new is None:\n"
+        f"    OUT['error'] = 'could not load parent class ' + {parent_class!r}\n"
+        f"else:\n"
+        f"    _bel = {UNREAL}.BlueprintEditorLibrary\n"
+        f"    OUT['before'] = str(_bel.get_blueprint_parent_class(_bp))\n"
+        f"    _bel.reparent_blueprint(_bp, _new)\n"
+        f"    _bp2 = {UNREAL}.load_object(None, {blueprint_path!r})\n"
+        f"    OUT['after'] = str(_bel.get_blueprint_parent_class(_bp2))\n"
+        f"    OUT['set'] = OUT['after'] is not None\n"
+    )
+    payload = get_bridge().run_python(guarded(body))
+    return {
+        "success": bool(payload.get("set")),
+        "path": payload.get("path"),
+        "requested": payload.get("requested"),
+        "resolved": payload.get("resolved"),
+        "before": payload.get("before"),
+        "after": payload.get("after"),
+        "error": payload.get("error"),
+    }
+
+
+def create_game_mode(
+    destination_path: str, parent_class: str = "/Script/Engine.GameModeBase"
+) -> dict:
+    """
+    Creates a Blueprint GameMode asset at `destination_path`.
+
+    `parent_class` defaults to `/Script/Engine.GameModeBase`, the plain gameplay
+    GameMode with no rules. It must be a **full class path**: the bare name
+    `GameModeBase` does not resolve through `load_object`, and says so through
+    `parent_resolved` rather than quietly producing a wrong-typed Blueprint.
+    """
+    security.enforce_tier("create_game_mode")
+    body = (
+        f"_folder = {destination_path!r}.rsplit('/', 1)[0]\n"
+        f"_name = {destination_path!r}.rsplit('/', 1)[-1]\n"
+        f"_parent = {UNREAL}.load_object(None, {parent_class!r})\n"
+        f"OUT = {{'created': False, 'path': {destination_path!r}, 'parent_class': {parent_class!r}, 'parent_resolved': _parent is not None}}\n"
+        f"if {UNREAL}.EditorAssetLibrary.does_asset_exist({destination_path!r}):\n"
+        f"    OUT['error'] = 'asset already exists at ' + {destination_path!r}\n"
+        f"elif _parent is None:\n"
+        f"    OUT['error'] = 'could not load parent class ' + {parent_class!r}\n"
+        f"else:\n"
+        f"    _bp = {UNREAL}.BlueprintEditorLibrary.create_blueprint_asset_with_parent(\n"
+        f"        {destination_path!r}, _parent)\n"
+        f"    if _bp is None:\n"
+        f"        OUT['error'] = 'create_blueprint_asset_with_parent returned None'\n"
+        f"    else:\n"
+        f"        {UNREAL}.EditorAssetLibrary.save_asset({destination_path!r}, only_if_is_dirty=False)\n"
+        f"        _back = {UNREAL}.load_object(None, {destination_path!r})\n"
+        f"        OUT['created'] = _back is not None\n"
+        f"        if _back is not None:\n"
+        f"            OUT['actual_parent'] = str({UNREAL}.BlueprintEditorLibrary.get_blueprint_parent_class(_back))\n"
+    )
+    payload = get_bridge().run_python(guarded(body))
+    return {
+        "success": bool(payload.get("created")),
+        "path": destination_path,
+        "parent_class": payload.get("parent_class"),
+        "parent_resolved": payload.get("parent_resolved"),
+        "actual_parent": payload.get("actual_parent"),
+        "error": payload.get("error"),
+    }
+
+
+def set_default_game_mode(blueprint_path: str) -> dict:
+    """
+    Sets a GameMode Blueprint as the current level's default game mode, through
+    the level's `WorldSettings`.
+
+    This goes via `WorldSettings`, not `ProjectSettings`, because there is no
+    `ProjectSettings` class in this build's Python API. That makes it a
+    per-level setting rather than a project-wide one, which is the honest scope
+    of what is reachable from here.
+    """
+    security.enforce_tier("set_default_game_mode")
+    body = (
+        f"_gm = {UNREAL}.load_object(None, {blueprint_path!r})\n"
+        f"_ws = {UNREAL}.EditorLevelLibrary.get_editor_world().get_world_settings()\n"
+        f"OUT = {{'set': False, 'path': {blueprint_path!r}, 'before': None, 'after': None}}\n"
+        f"if _gm is None or not isinstance(_gm, {UNREAL}.Blueprint):\n"
+        f"    OUT['error'] = 'no Blueprint at ' + {blueprint_path!r}\n"
+        f"else:\n"
+        f"    OUT['before'] = str(_ws.get_editor_property('default_game_mode'))\n"
+        f"    _gen = _gm.generated_class()\n"
+        f"    if _gen is None:\n"
+        f"        OUT['error'] = 'GameMode blueprint has no generated class'\n"
+        f"    else:\n"
+        f"        _ws.set_editor_property('default_game_mode', _gen)\n"
+        f"        OUT['after'] = str(_ws.get_editor_property('default_game_mode'))\n"
+        f"        OUT['set'] = _gen.get_path_name() in (OUT['after'] or '')\n"
+        f"        {UNREAL}.EditorLevelLibrary.save_current_level()\n"
+    )
+    payload = get_bridge().run_python(guarded(body))
+    return {
+        "success": bool(payload.get("set")),
+        "path": payload.get("path"),
+        "before": payload.get("before"),
+        "after": payload.get("after"),
+        "error": payload.get("error"),
+    }

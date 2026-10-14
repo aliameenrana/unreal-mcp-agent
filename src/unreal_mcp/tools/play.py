@@ -236,9 +236,11 @@ def execute_console_command(command: str) -> dict:
         return {"success": False, "error": "command must not be empty."}
 
     body = (
-        f"game = {UNREAL}.EditorLevelLibrary.get_game_world() \\\n"
+        f"game = {UNREAL}.EditorLevelLibrary.get_game_world() \
+"
         f"    if hasattr({UNREAL}, 'EditorLevelLibrary') else None\n"
-        f"world = {UNREAL}.EditorLevelLibrary.get_editor_world() \\\n"
+        f"world = {UNREAL}.EditorLevelLibrary.get_editor_world() \
+"
         f"    if hasattr({UNREAL}, 'EditorLevelLibrary') else None\n"
         # Prefer the game world: during PIE the editor world is gone entirely,
         # so requiring it first made every command fail exactly when a command
@@ -342,4 +344,59 @@ def get_console_variable(name: str) -> dict:
         "value": payload.get("value"),
         "value_type": payload.get("value_type"),
         "error": payload.get("error"),
+    }
+
+
+def capture_viewport_screenshot(
+    width: int = 1280, height: int = 720, filename: str | None = None
+) -> dict:
+    """
+    Takes a high-resolution screenshot of the editor viewport.
+
+    `AutomationLibrary.take_high_res_screenshot` returns an
+    `AutomationEditorTask` -- it *schedules* the capture and does not wait for
+    it, so the returned object is proof the job was queued and nothing more. The
+    tool therefore checks the file itself afterwards, retrying briefly, and
+    reports `captured` only once the image is actually on disk.
+
+    The existence check happens here rather than in the snippet: the editor's
+    `EditorAssetLibrary.does_asset_exist` only answers for `/Game/` content
+    paths and returns False for an absolute filesystem path, which would read
+    as a failed capture every time.
+
+    The engine appends its own suffix to `filename`, so the written name is
+    reported back as `written`.
+    """
+    security.enforce_tier("capture_viewport_screenshot")
+    import os as _os
+    import time as _time
+
+    _name = filename or f"/tmp/opencode/screenshot_{int(_time.time())}.png"
+    body = (
+        f"_shot = {UNREAL}.AutomationLibrary.take_high_res_screenshot(\n"
+        f"    {int(width)!r}, {int(height)!r}, {_name!r}, None, False, False,\n"
+        f"    {UNREAL}.ComparisonTolerance.LOW, '', 0.0, True)\n"
+        f"OUT = {{'scheduled': _shot is not None, 'requested': {_name!r},\n"
+        f"      'width': {int(width)!r}, 'height': {int(height)!r}, 'task': str(_shot)}}\n"
+    )
+    payload = get_bridge().run_python(guarded(body))
+
+    written = None
+    for _ in range(12):
+        for _cand in (_name, _name + ".png"):
+            if _os.path.exists(_cand):
+                written = _cand
+                break
+        if written:
+            break
+        _time.sleep(0.5)
+
+    return {
+        "success": bool(payload.get("scheduled")) and written is not None,
+        "scheduled": bool(payload.get("scheduled")),
+        "filename": payload.get("requested"),
+        "written": written,
+        "width": payload.get("width"),
+        "height": payload.get("height"),
+        "task": payload.get("task"),
     }

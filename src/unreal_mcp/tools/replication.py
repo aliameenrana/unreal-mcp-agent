@@ -219,3 +219,111 @@ def set_replication_flags(actor_name: str,
             "after": payload.get("after"),
             "component_replication_requested": payload.get(
                 "component_replication_requested")}
+
+
+def set_property_replication(
+    blueprint_path: str, variable_name: str, replication: str = "replicated"
+) -> dict:
+    """
+    Sets a Blueprint variable's replication mode and reads it back.
+
+    `replication` is one of `none`, `replicated`, or `rep_notify`. It maps to
+    the `BlueprintVariableReplication` enum -- **not a bool**, which is the
+    obvious guess and the wrong one: passing `True` raises "Cannot nativize
+    'bool' as 'Replication'".
+
+    `rep_notify` makes the setter auto-create an `OnRep_` function if one does
+    not already exist, which is why there is no separate
+    `add_rep_notify_function` tool -- asking for one would be asking for
+    something this call has already done.
+    """
+    security.enforce_tier("set_property_replication")
+    _mode = {"none": "NONE", "replicated": "REPLICATED", "rep_notify": "REP_NOTIFY"}
+    if replication not in _mode:
+        return {
+            "success": False,
+            "path": blueprint_path,
+            "variable": variable_name,
+            "error": f"replication must be one of {sorted(_mode)}, got {replication!r}",
+        }
+    _enum_name = _mode[replication]
+    body = (
+        f"_bp = {UNREAL}.load_object(None, {blueprint_path!r})\n"
+        f"OUT = {{'set': False, 'path': {blueprint_path!r}, 'variable': {variable_name!r}, 'requested': {replication!r}, 'before': None, 'after': None}}\n"
+        f"if _bp is None or not isinstance(_bp, {UNREAL}.Blueprint):\n"
+        f"    OUT['error'] = 'no Blueprint at ' + {blueprint_path!r}\n"
+        f"else:\n"
+        f"    _bel = {UNREAL}.BlueprintEditorLibrary\n"
+        f"    OUT['before'] = str(_bel.get_blueprint_variable_replication(_bp, {variable_name!r}))\n"
+        f"    _bel.set_blueprint_variable_replication(_bp, {variable_name!r}, {UNREAL}.BlueprintVariableReplication.{_enum_name})\n"
+        f"    OUT['after'] = str(_bel.get_blueprint_variable_replication(_bp, {variable_name!r}))\n"
+        f"    OUT['set'] = {_enum_name!r} in (OUT['after'] or '')\n"
+    )
+    payload = get_bridge().run_python(guarded(body))
+    return {
+        "success": bool(payload.get("set")),
+        "path": payload.get("path"),
+        "variable": payload.get("variable"),
+        "requested": replication,
+        "before": payload.get("before"),
+        "after": payload.get("after"),
+        "error": payload.get("error"),
+    }
+
+
+def verify_replication_setup(blueprint_path: str) -> dict:
+    """
+    Reports every variable a Blueprint **defines itself** and whether it
+    replicates. Read-only audit.
+
+    Only own variables are listed. `list_member_variable_names` returns every
+    inherited engine variable too -- fully-qualified as
+    `/Script/Engine.Actor.bReplicates` and so on, which on a plain Actor
+    Blueprint is 116 rows, none of them the caller's. Anything containing a
+    dot is inherited and is filtered out here.
+
+    A variable counts as replicating when its mode is not `NONE`, so
+    `replicating_count` is the useful number in the usual case where nothing
+    replicates.
+    """
+    security.enforce_tier("verify_replication_setup")
+    body = (
+        f"_bp = {UNREAL}.load_object(None, {blueprint_path!r})\n"
+        f"OUT = {{'found': False, 'path': {blueprint_path!r}, 'variables': [], 'inherited_skipped': 0, 'replicating_count': 0, 'total_count': 0}}\n"
+        f"if _bp is None or not isinstance(_bp, {UNREAL}.Blueprint):\n"
+        f"    OUT['error'] = 'no Blueprint at ' + {blueprint_path!r}\n"
+        f"else:\n"
+        f"    _bel = {UNREAL}.BlueprintEditorLibrary\n"
+        f"    _rep = 0\n"
+        f"    for _n in _bel.list_member_variable_names(_bp):\n"
+        f"        _name = str(_n)\n"
+        f"        if '.' in _name:\n"
+        f"            OUT['inherited_skipped'] += 1\n"
+        f"            continue\n"
+        f"        _r = str(_bel.get_blueprint_variable_replication(_bp, _name))\n"
+        f"        if 'NONE' not in _r:\n"
+        f"            _rep += 1\n"
+        f"        OUT['variables'].append({{'name': _name, 'replication': _r}})\n"
+        f"    OUT['replicating_count'] = _rep\n"
+        f"    OUT['total_count'] = len(OUT['variables'])\n"
+        f"    OUT['found'] = True\n"
+    )
+    payload = get_bridge().run_python(guarded(body))
+    if not payload.get("found"):
+        return {
+            "success": False,
+            "path": blueprint_path,
+            "error": payload.get("error"),
+            "variables": [],
+            "inherited_skipped": 0,
+            "replicating_count": 0,
+            "total_count": 0,
+        }
+    return {
+        "success": True,
+        "path": blueprint_path,
+        "variables": payload.get("variables", []),
+        "inherited_skipped": payload.get("inherited_skipped"),
+        "replicating_count": payload.get("replicating_count"),
+        "total_count": payload.get("total_count"),
+    }

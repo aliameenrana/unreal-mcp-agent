@@ -385,6 +385,12 @@ TOOL_RISK_TIERS: dict[str, RiskTier] = {
     "add_sequence_section": RiskTier.CONSTRUCTIVE,
     "create_animation_blueprint": RiskTier.CONSTRUCTIVE,
     "get_animation_blueprint_info": RiskTier.READ_ONLY,
+    "set_property_replication": RiskTier.CONSTRUCTIVE,
+    "verify_replication_setup": RiskTier.READ_ONLY,
+    "capture_viewport_screenshot": RiskTier.READ_ONLY,
+    "set_blueprint_parent_class": RiskTier.CONSTRUCTIVE,
+    "create_game_mode": RiskTier.CONSTRUCTIVE,
+    "set_default_game_mode": RiskTier.CONSTRUCTIVE,
     "execute_python": RiskTier.SYSTEM,  # gated separately via check_python_code, not blocked outright
 }
 

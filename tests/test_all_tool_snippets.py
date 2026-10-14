@@ -154,6 +154,8 @@ PER_TOOL = {
     "add_blueprint_variable_node": {"mode": "get"},
     # A destructive tool needs confirm=True before it will build a snippet.
     "delete_blueprint_nodes": {"confirm": True},
+    # Reparenting needs a real parent class path or the snippet resolves to None.
+    "set_blueprint_parent_class": {"parent_class": "/Script/Engine.Actor"},
 }
 
 # A payload shaped like a real editor reply. Tools read specific keys out of it
