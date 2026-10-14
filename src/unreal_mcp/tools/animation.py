@@ -423,3 +423,88 @@ def find_actor_expr(actor_name: str) -> str:
         f"next((a for a in {actor_subsystem()}.get_all_level_actors() "
         f"if a.get_name() == {actor_name!r}), None)"
     )
+
+
+def create_animation_blueprint(destination_path: str, name: str | None = None) -> dict:
+    """
+    Creates an `AnimBlueprint` asset at `destination_path`.
+
+    It is created without a target skeleton, because `AnimBlueprint` exposes no
+    `target_skeleton` setter in Python -- reading the property works and returns
+    None. This project also has no SkeletalMesh or Skeleton asset to point one
+    at, so the blueprint is inert until one is assigned in the editor.
+
+    That is also why there is no state-machine tool here: `get_animation_graph`
+    is not exposed, and adding an anim state or transition needs the animation
+    graph, not the Blueprint's editor-only graph list.
+    """
+    security.enforce_tier("create_animation_blueprint")
+    body = (
+        f"_folder = {destination_path!r}.rsplit('/', 1)[0]\n"
+        f"_name = {name!r} if {name!r} else {destination_path!r}.rsplit('/', 1)[-1]\n"
+        f"OUT = {{'created': False, 'path': {destination_path!r}, 'class': None,\n"
+        f"      'target_skeleton': None}}\n"
+        f"if {UNREAL}.EditorAssetLibrary.does_asset_exist({destination_path!r}):\n"
+        f"    OUT['error'] = 'asset already exists at ' + {destination_path!r}\n"
+        f"else:\n"
+        f"    _bp = {UNREAL}.AssetToolsHelpers.get_asset_tools().create_asset(\n"
+        f"        _name, _folder, {UNREAL}.AnimBlueprint, {UNREAL}.AnimBlueprintFactory())\n"
+        f"    if _bp is None:\n"
+        f"        OUT['error'] = 'factory returned None'\n"
+        f"    else:\n"
+        f"        {UNREAL}.EditorAssetLibrary.save_asset({destination_path!r}, only_if_is_dirty=False)\n"
+        f"        _back = {UNREAL}.load_object(None, {destination_path!r})\n"
+        f"        OUT['created'] = _back is not None\n"
+        f"        if _back is not None:\n"
+        f"            OUT['class'] = str(_back.get_class().get_name())\n"
+        f"            OUT['target_skeleton'] = str(_back.get_editor_property('target_skeleton'))\n"
+        f"            OUT['has_generated_class'] = _back.generated_class() is not None\n"
+    )
+    payload = get_bridge().run_python(guarded(body))
+    return {
+        "success": bool(payload.get("created")),
+        "path": destination_path,
+        "class": payload.get("class"),
+        "target_skeleton": payload.get("target_skeleton"),
+        "has_generated_class": payload.get("has_generated_class"),
+        "error": payload.get("error"),
+    }
+
+
+def get_animation_blueprint_info(blueprint_path: str) -> dict:
+    """
+    Reads an animation Blueprint's type, parent, and skeleton.
+
+    Safe on any AnimBlueprint. Reports `has_animation_graph` explicitly, which
+    is always False: `get_animation_graph` is not exposed to Python, so the
+    state machine cannot be inspected from here.
+    """
+    security.enforce_tier("get_animation_blueprint_info")
+    body = (
+        f"_bp = {UNREAL}.load_object(None, {blueprint_path!r})\n"
+        f"OUT = {{'found': False, 'path': {blueprint_path!r}, 'has_animation_graph': False}}\n"
+        f"if _bp is None or not isinstance(_bp, {UNREAL}.AnimBlueprint):\n"
+        f"    OUT['error'] = 'no AnimBlueprint at ' + {blueprint_path!r}\n"
+        f"else:\n"
+        f"    OUT['found'] = True\n"
+        f"    OUT['class'] = str(_bp.get_class().get_name())\n"
+        f"    OUT['target_skeleton'] = str(_bp.get_editor_property('target_skeleton')) \\\n"
+        f"        if _bp.get_editor_property('target_skeleton') else None\n"
+        f"    OUT['has_generated_class'] = _bp.generated_class() is not None\n"
+    )
+    payload = get_bridge().run_python(guarded(body))
+    if not payload.get("found"):
+        return {
+            "success": False,
+            "path": blueprint_path,
+            "error": payload.get("error"),
+            "has_animation_graph": False,
+        }
+    return {
+        "success": True,
+        "path": blueprint_path,
+        "class": payload.get("class"),
+        "target_skeleton": payload.get("target_skeleton"),
+        "has_generated_class": payload.get("has_generated_class"),
+        "has_animation_graph": False,
+    }

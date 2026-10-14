@@ -623,6 +623,37 @@ grain in PLAN.md's "MetaHuman" section, deliberately deferred until PIE
 screenshot infrastructure exists (a silently broken character is worse than
 no tool, and only a screenshot catches bad topology/missing rig).
 
+### A cluster of "planned" domains that turned out to be unreachable
+
+📋 `create_enum_asset` / `create_struct_asset` — **not buildable.**
+`UserDefinedEnum` and `UserDefinedStruct` exist as classes, but neither
+`UserDefinedEnumFactory` nor `UserDefinedStructFactory` exists anywhere in 5.8,
+and `create_asset` with a bare `unreal.Factory` fails with "Class 'Factory' is
+abstract". There is no concrete factory to hand it.
+
+📋 `get_project_settings` / `set_project_setting` — **not buildable.** There is
+no `ProjectSettings` class in the `unreal` Python module and no `Settings`
+class either. What exists is per-feature subclasses only
+(`RigVMProjectSettings`, `InterchangeProjectSettings`,
+`ControlRigPoseProjectSettings`), which is not the project-wide settings object
+the tools were meant to read.
+
+📋 `create_animation_blueprint` / `get_animation_blueprint_info` — **built and
+verified**, but inert. `AnimBlueprint` exposes no `target_skeleton` setter
+(reading the property works and returns None) and no `get_animation_graph`, and
+this project has no Skeleton or SkeletalMesh asset to assign anyway. So there is
+no state-machine tool: adding an anim state or transition needs the animation
+graph, which is not exposed. Note `AnimBlueprint` also has no `parent_class`
+property, unlike a normal Blueprint.
+
+📋 `create_render_target` — `TextureRenderTarget2D` exists as a class but
+`RenderTarget2DFactory` does not, so the same abstract-`Factory` wall applies.
+
+📋 Level ops (`new_level`, `load_level`, `save_level`, `list_levels`,
+`get_current_level`) — **already built and live-verified** in `levels.py`; they
+were never missing. Listed here only because a stale inventory claimed they
+were outstanding.
+
 ### Control Rig — asset creation HANGS THE EDITOR (reproduced twice)
 
 📋 The read side and graph mutation are real and fully bound. **Creating a

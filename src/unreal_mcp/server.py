@@ -163,6 +163,8 @@ mcp.add_tool(_wrap(animation.stop_animation))
 mcp.add_tool(_wrap(animation.pause_animation))
 mcp.add_tool(_wrap(animation.set_play_rate))
 mcp.add_tool(_wrap(animation.get_animation_state))
+mcp.add_tool(_wrap(animation.create_animation_blueprint))
+mcp.add_tool(_wrap(animation.get_animation_blueprint_info))
 
 # Play-in-editor and console
 mcp.add_tool(_wrap(play.get_play_state))

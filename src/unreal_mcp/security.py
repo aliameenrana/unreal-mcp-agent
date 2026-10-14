@@ -383,6 +383,8 @@ TOOL_RISK_TIERS: dict[str, RiskTier] = {
     "get_sequence_info": RiskTier.READ_ONLY,
     "add_sequence_track": RiskTier.CONSTRUCTIVE,
     "add_sequence_section": RiskTier.CONSTRUCTIVE,
+    "create_animation_blueprint": RiskTier.CONSTRUCTIVE,
+    "get_animation_blueprint_info": RiskTier.READ_ONLY,
     "execute_python": RiskTier.SYSTEM,  # gated separately via check_python_code, not blocked outright
 }
 
