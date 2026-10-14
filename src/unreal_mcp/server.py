@@ -33,6 +33,7 @@ from .tools import (
     presets,
     python_exec,
     scene,
+    sequencer,
     umg,
 )
 
@@ -268,6 +269,16 @@ for _fn in (
     umg.remove_widget_from_viewport,
     umg.set_widget_visibility,
     umg.set_widget_text,
+):
+    mcp.add_tool(_wrap(_fn))
+
+# Sequencer (master tracks and sections only; bindings need add_possessable,
+# which hard-hangs the editor)
+for _fn in (
+    sequencer.create_level_sequence,
+    sequencer.get_sequence_info,
+    sequencer.add_sequence_track,
+    sequencer.add_sequence_section,
 ):
     mcp.add_tool(_wrap(_fn))
 

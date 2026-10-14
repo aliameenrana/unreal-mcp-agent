@@ -250,6 +250,35 @@ widget tree.** `WidgetTree` in 5.8 exposes no methods beyond base `Object` — n
 standalone `TextBlock` and verifies `get_text()` on it. A designer-authored tree
 must be authored in the designer.
 
+### sequencer.py — the safe subset, verified
+
+✅ `create_level_sequence`, `get_sequence_info`, `add_sequence_track`,
+`add_sequence_section`
+
+The whole module is shaped by one constraint: anything that needs a **binding**
+requires a call that hard-hangs the editor. `MovieSceneSequence.add_track` takes
+only a track class and works, so tracks here are unowned master tracks. Adding a
+section is `MovieSceneTrackExtensions.add_section(track)` followed by the
+section's own `set_range(start, end)` — note the section instance method, not the
+extension classmethod.
+
+Two things that cost time to find:
+
+- **`FrameRate` is a struct with `numerator` and `denominator`.** It is not a
+  float, and it has no `evaluate()` in 5.8. Read rates back as
+  `numerator / denominator`.
+- Brace-escaping bites inside these f-string bodies: a nested dict literal needs
+  `{{` / `}}` or the outer f-string tries to evaluate it as an expression.
+
+**There is no key-setting tool, and that is a real gap.** Keys live on channels.
+The only `add_key` methods in the stub belong to specific channel classes
+(`MovieSceneScriptingConstraintChannel`, `MovieSceneScriptingActorReferenceChannel`),
+and there is no Python route from a track or section to its channels:
+`MovieSceneScriptingLayer` exposes no channel methods at all, and
+`SequencerChannelProxy` is a UI-selection concept. `add_sequence_section` is the
+deepest verifiable equivalent, and it is what the plan called `add_sequence_key`
+before it was understood that keys were unreachable.
+
 ### landscape.py — foliage only
 
 ✅ `add_foliage_type`
@@ -2183,3 +2212,237 @@ clicks it, so an automated call sees a timeout instead of a question. Pass
 call site, and keep the `does_asset_exist` pre-check as well: `delete_asset` is
 asynchronous and can report a deletion that has not landed on disk, so the
 pre-check alone is not sufficient. `create_data_table` was missing the flag.
+
+---
+
+## Sequence build plans (SEQUENCE_DESIGNS.md, Fab/Mixamo/VR dropped from scope)
+
+Per-sequence build plans, in dependency order, for the recipes in
+`SEQUENCE_DESIGNS.md`. Each entry: what it needs (built/planned/needs a new
+primitive), the exact call order, the verification step, and security tier.
+Nothing here is built yet; this is the plan reviewed before code. Fab/
+Mixamo asset automation and VR are out of scope per explicit decision —
+their findings stay in `SEQUENCE_DESIGNS.md`'s git history, not carried
+forward into a build plan.
+
+### Phase 0: the two gating primitives — build these first, everything else waits
+
+**`add_anim_state(animbp_path, state_name, animation_asset_path, state_machine_name="AnimGraph")`**
+and **`add_anim_transition(animbp_path, from_state, to_state, condition_graph_spec)`**
+
+- Backing API: `unreal.AnimationStateMachineLibrary`, per PLAN.md's
+  Animation section. Not yet live-probed — step 2a (docs) is done per
+  RESEARCH_NEW_DOMAINS.md; step 2b (live `dir()` confirmation against the
+  installed 5.8 build) has not run. Do that before writing either function.
+- Order: `create_animation_blueprint` (already buildable) → `add_anim_state`
+  once per state → `add_anim_transition` once per edge, condition wired via
+  `blueprint_graph.py`'s existing node tools (confirmed buildable) setting a
+  bool/enum the transition reads.
+- Verification: `get_blueprint_compile_errors` on the AnimBP; state count
+  and transition count read back match what was requested, not just "zero
+  compile errors" (a transition silently not added still compiles clean if
+  nothing references the missing edge).
+- Security tier: `CONSTRUCTIVE` — creates/modifies an asset, not destructive.
+- **Gates:** the entire Enemy AI recipe below, and the Weapon recipe's
+  melee-combo sequence.
+
+**`add_widget_to_viewport(widget_blueprint_path, actor_or_player_controller)`**
+
+- Backing API: `unreal.WidgetBlueprintLibrary.create` + the resulting
+  widget's `add_to_viewport()`. PLAN.md flags this "probe first — 0 hits in
+  the stub under that name" — this is a live-probe item before anything
+  else, not a docs-confirmed call yet.
+- Order: `create_widget_blueprint` (confirmed buildable) → resolve the
+  widget class → `WidgetBlueprintLibrary.create(widget_class, owning_player)`
+  → `.add_to_viewport()` on the result. PIE-only: a widget only meaningfully
+  renders during Play, so this tool's useful verification requires a PIE
+  session already running.
+- Verification: read back `is_in_viewport()` if that method exists on the
+  live object (confirm via the step-3 `dir()` sweep); if it doesn't exist,
+  verification has to be "no exception raised and the widget object is
+  non-null," flagged as weaker than the project's usual read-back bar and
+  stated as such in the tool's own docstring, not silently accepted as
+  equivalent.
+- Security tier: `CONSTRUCTIVE`.
+- **Gates:** the entire UI/UMG recipe.
+
+### Phase 1: ship with zero new primitives — these need nothing from Phase 0
+
+**Level generation: `seq_scatter_set_dressing` / `seq_place_lighting_mood`**
+
+- Both are direct reuses of already-built, live-verified presets
+  (`set_dressing_pass`, `light_scene_preset`). No new code; a sequence here
+  is just the orchestrator calling an existing preset with recipe-specific
+  parameters. Ship immediately, no build work beyond writing the calling
+  prompt/plan itself.
+
+**Inventory recipe: all 4 sequences**
+
+- `seq_define_item_schema` → `create_struct_asset`/`create_data_table`
+  (planned, standard `AssetToolsHelpers` pattern, no open questions).
+- `seq_build_inventory_component_blueprint` → `create_blueprint` +
+  `add_blueprint_member_variable` + `create_blueprint_function_graph` +
+  `add_blueprint_branch_node` + `connect_blueprint_pins`, all confirmed
+  built in `blueprint_graph.py`. No gate.
+- `seq_build_pickup_actor` → reuses the planned `create_pickup_item` preset
+  design (not yet built, but needs nothing from Phase 0 either — only
+  `create_blueprint`/`add_component`/`add_blueprint_variable`, all
+  confirmed buildable).
+- `seq_wire_overlap_to_inventory` → `blueprint_graph.py` tools only.
+- Verification per sequence: `get_blueprint_compile_errors` after every
+  graph edit; `list_blueprint_variables` confirms the array variable's
+  type; `list_blueprint_graph_nodes` confirms the overlap event is actually
+  wired to the call node, not merely present unwired.
+- Security tier: `CONSTRUCTIVE` throughout.
+
+**Health/scoring/debuffs recipe: all 5 sequences**
+
+- `seq_init_health_pool` → `add_blueprint_member_variable`. No gate.
+- `seq_build_damage_function_graph` → `create_blueprint_function_graph` +
+  `add_blueprint_branch_node` (threshold checks) + a call into the
+  already-built `damage_state_transition` preset + a call into the death
+  function below. No gate.
+- `seq_build_debuff_timer_graph` → needs a Delay node. Confirm
+  `add_blueprint_call_function_node` can add a `Delay` latent node
+  specifically (latent nodes may have a different call shape than the
+  plain function/branch/event nodes already proven in `blueprint_graph.py`
+  — this is the one open question in this sequence, flag for a live probe
+  before building, not assumed to work identically).
+- `seq_track_score` → a Blueprint integer variable + increment calls from
+  other recipes' event functions. No gate.
+- `seq_build_death_function_graph` → stop animation (`stop_animation`,
+  built), disable collision (`set_collision_enabled`, built), optional
+  ragdoll (`set_simulate_physics`, built), despawn after Delay (same open
+  question as the debuff timer). No other gate.
+- Verification: compile check per graph; `list_blueprint_variables`
+  confirms health/score variables exist with the expected type.
+- Security tier: `CONSTRUCTIVE`.
+
+### Phase 2: depends on Phase 0 landing first
+
+**Enemy AI recipe (`seq_acquire_character_asset` through `seq_verify_enemy_construction`)**
+
+- `seq_acquire_character_asset` / `seq_discover_or_import_animations` — no
+  gate, built from `list_assets_in_path`/`import_skeletal_mesh` (planned,
+  standard pattern) plus `get_property` compatibility checks.
+- `seq_build_anim_state_machine` — **gated on Phase 0's `add_anim_state`/
+  `add_anim_transition`.** Do not start this sequence before those are
+  live-verified.
+- `seq_wire_perception_logic` — no gate on Phase 0, but needs
+  `list_blueprint_available_nodes` run first to confirm the exact
+  distance-check and line-trace node names exist before assuming
+  `GetDistanceTo`/`LineTraceSingle` are the right call names — this
+  project's own 5-step protocol applies to Blueprint graph node names the
+  same way it applies to Python API names.
+- `seq_attach_weapon_for_actual_type` — no gate, built from
+  `get_skeletal_mesh_sockets` (planned, not yet live-verified itself) +
+  `attach_prop_to_socket` (designed, composed of built primitives).
+- `seq_verify_enemy_construction` — the cross-sequence consistency check;
+  no new primitive, just calls the verification steps of the prior
+  sequences again, consolidated, plus the optional short-PIE pass reading
+  `CanSeeTarget`/`InAttackRange` back live.
+- Security tier: `CONSTRUCTIVE` throughout; nothing here is destructive.
+
+**Weapon recipe: ranged/magic sequences — no Phase 0 gate; melee-combo sequence — gated**
+
+- `seq_define_weapon_data_table`, `seq_build_ranged_weapon_actor`,
+  `seq_build_projectile_blueprint`, `seq_wire_fire_function_graph`,
+  `seq_wire_projectile_impact_graph`, `seq_wire_hitscan_variant`,
+  `seq_build_sheathe_drawn_toggle` — all built from `blueprint_graph.py` +
+  already-built component/attach primitives. No gate.
+- `seq_build_melee_weapon_actor` — no gate (mesh + collision component,
+  standard `add_component` pattern).
+- `seq_wire_attack_combo_graph` — **gated on Phase 0's `add_anim_state`.**
+- Verification: compile check after every graph edit (this recipe chains
+  the most node-add calls in sequence of anything in this document, so a
+  dangling connection is the single most likely failure point — do not
+  skip the per-step compile check to save round trips).
+
+**Magic recipe: both sequences — no Phase 0 gate**
+
+- `seq_build_spell_data_table`, `seq_build_ability_cast_graph`,
+  `seq_wire_targeted_vs_aoe_branch` — all `blueprint_graph.py` + data table
+  + the already-built `cast_spell_effect` preset's underlying primitives.
+  Same open question as the debuff timer on the cooldown Delay node.
+
+**UI/UMG recipe: gated entirely on Phase 0's `add_widget_to_viewport`**
+
+- `seq_build_hud_widget`, `seq_build_inventory_ui_widget`,
+  `seq_build_interaction_prompt_widget`,
+  `seq_wire_widget_to_viewport_lifecycle` — none of these should be started
+  before `add_widget_to_viewport` clears its live probe. The
+  event-dispatcher cross-Blueprint wiring in `seq_build_inventory_ui_widget`
+  additionally needs its own live-probe confirmation of the exact call
+  shape before committing, flagged separately in SEQUENCE_DESIGNS.md.
+
+### Phase 3: Vehicles — confirmed partially scriptable, needs one live-probe pass first
+
+**`seq_build_vehicle_actor`**
+
+- Backing API: `unreal.ChaosWheeledVehicleMovementComponent`/
+  `unreal.ChaosVehicleMovementComponent`, confirmed-existing Python classes
+  (doc pages 302-redirected during research; existence corroborated via
+  cached snippets and the parallel C++ API pages, not read live — treat
+  class existence as high-confidence, not yet step-2b-cleared).
+- Order: `import_static_mesh`/resolve an existing vehicle mesh →
+  `add_component` (the Chaos Vehicle Movement Component, same pattern as
+  every other component-adding tool) → `set_component_property` for wheel
+  setup (`FChaosWheelSetup`: bone name, wheel class, offset) and engine
+  config (`FVehicleEngineConfig`: max RPM, torque curve reference).
+- **Live-probe required before writing code:** exact Python property names
+  on the component (the doc fetch failure means these were never read
+  directly), and whether `FRuntimeFloatCurve` fields (torque/steering
+  curves) accept key-setting via `set_editor_property` the way every other
+  struct property in this project does, or need a different call shape
+  entirely. Do not guess the property names from the C++ UPROPERTY names;
+  confirm via `dir()` on the live component first, same as every other
+  domain in this project.
+- Verification: `get_component_property`-style read-back (or
+  `get_editor_property` if no dedicated getter exists) on every property
+  just set, same pattern as every other component tool in this project —
+  trust nothing's setter return value.
+- Security tier: `CONSTRUCTIVE`.
+
+**`seq_wire_enter_exit_graph`**
+
+- No new primitive: overlap event (`blueprint_graph.py`) → possess/
+  un-possess call nodes (`add_blueprint_call_function_node`, confirm the
+  exact possess/un-possess node names via `list_blueprint_available_nodes`
+  first) → seat-socket attach via `attach_prop_to_socket`'s underlying
+  attach primitives, reused inside the graph.
+- Verification: compile check; `get_attach_parent_socket_name` on the
+  seated-driver visual attach.
+
+**`seq_wire_vehicle_input_bindings`**
+
+- Backing API: `unreal.InputAction`/`unreal.InputMappingContext` (confirmed
+  scriptable per research — `InputAction_Factory` exists,
+  `InputMappingContext.map_key(action, key)` is a confirmed Python method).
+  No VR-specific OpenXR complication applies here; vehicle input is
+  ordinary keyboard/gamepad mapping, not headset-controller binding, so
+  this sequence has no open question beyond the standard asset-creation
+  pattern already used elsewhere.
+- Order: create the InputAction assets (throttle, steer, brake) →
+  `InputMappingContext.map_key` per action → wire each action's triggered
+  event into the vehicle Blueprint's graph via `add_blueprint_event_node`.
+- Verification: compile check; `list_blueprint_graph_nodes` confirms each
+  input event node exists and is connected.
+
+**`seq_apply_vehicle_default_tuning`**
+
+- No Epic one-click "sane default" vehicle template was confirmed to
+  exist, so this sequence hand-authors a conservative default (moderate
+  torque curve, symmetric wheel setup, mid-range suspension stiffness)
+  rather than relying on an assumed template. States its ceiling honestly
+  in its own report: a drivable vehicle with untuned-but-functional
+  handling, not competitive-quality physics — this project does not
+  attempt to automate hand-tuning away.
+- Depends entirely on `seq_build_vehicle_actor`'s live-probe landing first,
+  since this sequence sets the same curve/property fields that probe
+  confirms the shape of.
+
+**Vehicle recipe build order:** `seq_build_vehicle_actor`'s live-probe
+session first (the one genuinely open question in this whole recipe) →
+`seq_wire_vehicle_input_bindings` (no dependency on the probe, can be built
+in parallel) → `seq_wire_enter_exit_graph` → `seq_apply_vehicle_default_tuning`
+last, since it depends on the first sequence's confirmed property names.

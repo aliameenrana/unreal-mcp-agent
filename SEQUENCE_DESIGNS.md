@@ -450,65 +450,12 @@ unconfirmed in its exact shape.
 
 ---
 
-## Recipe: VR authoring — PARTIALLY SCRIPTABLE, one confirmed hard wall
+## VR authoring — dropped from scope
 
-Research verdict, split cleanly into a scriptable half and a blocked half:
-
-**Scriptable, confirmed:** `unreal.InputAction`/`unreal.InputMappingContext`
-are both DataAssets creatable via the standard
-`AssetTools.create_asset()` + factory pattern
-(`unreal.InputAction_Factory` confirmed to exist).
-`InputMappingContext.map_key(action, key)` is a confirmed Python method for
-binding a generic key/button to an action.
-`unreal.MotionControllerComponent` is a confirmed Python class with
-standard settable properties (hand/motion source, display model, transform
-flags). So: defining input actions, generic key mappings, and instantiating
-motion controllers with sane defaults is all genuinely automatable —
-`seq_build_vr_pawn` and the input-definition half of `seq_wire_vr_grab_logic`
-rest on solid ground.
-
-**Not scriptable, confirmed:** the actual per-headset OpenXR
-interaction-profile-to-button binding has no Python-exposed path. UE5's
-OpenXR plugin doesn't expose an `OpenXRActionSet` asset type the way the
-older SteamVR plugin did (`unreal.SteamVRActionSet` exists; there's no
-OpenXR equivalent). This binding happens through Project Settings > Input,
-mapping Enhanced Input keys to OpenXR interaction-profile-specific button
-paths — a Project Settings editor panel, not an asset with a Python
-factory. The one Python hook found,
-`unreal.OpenXRInputFunctionLibrary.begin_xr_session()`, attaches an
-already-built mapping context to a running session; it does not create or
-edit headset-specific button bindings themselves.
-
-**The practical way around the wall, confirmed real:** Epic's own VR
-Template ships a working default VRPawn with teleport locomotion already
-wired, instantiable via Python like any other Blueprint/Pawn asset. Since
-its input bindings were authored once by Epic and ship with the template,
-a sequence that **starts from the VR Template and only customizes what's
-exposed as ordinary properties** (which hand, which mesh, locomotion speed)
-sidesteps the OpenXR-binding wall entirely rather than fighting it.
-Customizing per-headset button mapping beyond the template's shipped
-defaults stays editor-UI-only and out of scope.
-
-- **`seq_build_vr_pawn`** — instantiate the VR Template's Pawn (not build
-  one from scratch), customize camera/motion-controller properties via
-  `set_editor_property`. Confirmed scriptable end to end.
-- **`seq_wire_vr_grab_logic`** — overlap + input-action-triggered
-  attach/detach graph function, reusing the socket-attach pattern, driven
-  by motion controller transforms. The input-action definition half is
-  confirmed scriptable; it binds to the template's existing default key
-  mappings rather than authoring new per-headset button bindings.
-- **`seq_wire_teleport_locomotion_graph`** — reuses the VR Template's
-  already-wired teleport locomotion rather than authoring a new
-  trace-from-controller + blink/fade graph from scratch, since the
-  template ships this and re-deriving it is pure duplicated effort against
-  a wall that doesn't need fighting.
-
-**Scope stated honestly, per this project's standing discipline:** this
-recipe automates "assemble a working VR pawn with grab and teleport
-locomotion, starting from Epic's template." It does not automate
-"configure custom OpenXR controller-button mappings for a bespoke input
-scheme" — that step is confirmed editor-UI-only, not a research gap that
-further probing would close.
+Out of scope per explicit decision. Research findings (scriptable Enhanced
+Input/MotionControllerComponent, non-scriptable per-headset OpenXR button
+binding, VR Template as the practical workaround) are preserved in this
+document's git history if this is revisited later, not carried forward here.
 
 ---
 
