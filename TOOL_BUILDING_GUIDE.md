@@ -2225,46 +2225,93 @@ Mixamo asset automation and VR are out of scope per explicit decision —
 their findings stay in `SEQUENCE_DESIGNS.md`'s git history, not carried
 forward into a build plan.
 
-### Phase 0: the two gating primitives — build these first, everything else waits
+### Phase 0: the two gating primitives — status after live-probing against the running editor
 
-**`add_anim_state(animbp_path, state_name, animation_asset_path, state_machine_name="AnimGraph")`**
-and **`add_anim_transition(animbp_path, from_state, to_state, condition_graph_spec)`**
+**`add_widget_to_viewport` is already built, live-verified, and registered** —
+see `tools/umg.py`. Not a gate anymore; the UI/UMG recipe is unblocked.
+`WidgetBlueprintLibrary` does **not** exist in this installed build (confirmed
+by the person who built it); the real path is
+`unreal.new_object(generated_class, outer)` → `UserWidget.add_to_viewport()`
+on the instance. Its security tier was found mistiered `READ_ONLY` (it
+creates a live widget instance) and has been corrected to `CONSTRUCTIVE`,
+along with five sibling Audio/UMG/Foliage tools with the same mistiering bug
+(`import_sound_wave`, `create_sound_cue`, `play_sound_at_location`,
+`create_sound_attenuation`, `create_widget_blueprint`, `set_widget_visibility`,
+`set_widget_text`, `add_foliage_type`, `paint_foliage_instances`) — all
+fixed in `security.py` in the same pass.
 
-- Backing API: `unreal.AnimationStateMachineLibrary`, per PLAN.md's
-  Animation section. Not yet live-probed — step 2a (docs) is done per
-  RESEARCH_NEW_DOMAINS.md; step 2b (live `dir()` confirmation against the
-  installed 5.8 build) has not run. Do that before writing either function.
-- Order: `create_animation_blueprint` (already buildable) → `add_anim_state`
-  once per state → `add_anim_transition` once per edge, condition wired via
-  `blueprint_graph.py`'s existing node tools (confirmed buildable) setting a
-  bool/enum the transition reads.
-- Verification: `get_blueprint_compile_errors` on the AnimBP; state count
-  and transition count read back match what was requested, not just "zero
-  compile errors" (a transition silently not added still compiles clean if
-  nothing references the missing edge).
-- Security tier: `CONSTRUCTIVE` — creates/modifies an asset, not destructive.
-- **Gates:** the entire Enemy AI recipe below, and the Weapon recipe's
-  melee-combo sequence.
+**`add_anim_state`/`add_anim_transition`: CONFIRMED NOT BUILDABLE.** Live-probed
+against the running 5.8 editor (not docs-only), full result below — this
+overturns PLAN.md's assumption that `AnimationStateMachineLibrary` was the
+backing API.
 
-**`add_widget_to_viewport(widget_blueprint_path, actor_or_player_controller)`**
+- `create_animation_blueprint` **is real and confirmed working**:
+  `AnimBlueprintFactory` + `target_skeleton` set via `set_editor_property`,
+  created against `/Engine/EditorMeshes/SkeletalMesh/DefaultSkeletalMesh_Skeleton`
+  (always present, even in an empty project — the right scratch target for
+  this kind of probe). `AnimBlueprint.get_animation_graphs()` returns the
+  root `AnimGraph` (class `AnimationGraph`). This part of Phase 0 ships as
+  planned.
+- `unreal.AnimationStateMachineLibrary` exists but is a **runtime** query/
+  control surface only (`get_state`, `set_state`, `is_state_blending_in/out`,
+  `get_relevant_anim_time_remaining`) — the same tier of capability
+  `set_animation_mode`/`get_animation_state` already cover at the instance
+  level. It has no `add_state`, no `add_transition`, nothing graph-editing.
+  PLAN.md's assumption that this was the backing API was wrong.
+- A state machine is not a flat graph add — it's an `AnimGraphNode_StateMachine`
+  node placed inside the root `AnimGraph`, confirmed addable via
+  `BlueprintGraphEditor.get_graph_editor_by_name(blueprint, "AnimGraph")`
+  → `create_node_from_name("Animation|StateMachines|StateMachine", location,
+  [], None)`. **Its location argument is `Vector2D`, not `IntPoint`** — passing
+  `IntPoint` raises `Cannot nativize 'IntPoint' as 'Location'`, a real trap,
+  inconsistent with other node-add calls in this same `BlueprintGraphEditor`
+  family that do take `IntPoint` for position.
+- The state machine node's own sub-graph **is** reachable:
+  `BlueprintGraphEditor.get_graph_editor_by_name(blueprint, "New State Machine")`
+  (the node's title, confirmed via `get_node_title()`) resolves directly to
+  an editor scoped to the inner graph. This is the same name-based resolution
+  `BlueprintGraphEditor` already uses everywhere else.
+- **Inside that inner graph, `list_available_nodes([])` returns exactly 2
+  entries: a comment node and a documentation node.** No "add state," no
+  "add conduit," nothing state-machine-specific. `AnimStateNode`/
+  `AnimStateConduitNode`/`AnimStateTransitionNode` all exist as classes
+  (confirmed via `dir(unreal)`) but none has a factory method, a `*Library`
+  creation call, or any constructor path found — `dir(unreal.AnimStateNode)`
+  shows only generic `UObject`-level methods (`get_editor_property`,
+  `rename`, `modify`, ...), nothing that creates a sibling node or wires a
+  transition.
+- This is a genuinely exhausted search, not a one-search guess: class
+  existence confirmed, the generic graph-editing entry point confirmed
+  reachable on both the outer and inner graph, the available-node palette
+  for that specific graph type read directly (not inferred), and a
+  dedicated sibling-class sweep for any `AnimState*`/`*Library` creation
+  path came back empty. Same confidence tier as the already-documented
+  Niagara-graph-authoring and Landscape-sculpting walls.
+- **Verdict: AnimBP state machine authoring (new states, new transitions) is
+  out of scope, same as Niagara module authoring and Landscape sculpting.**
+  What remains buildable in this domain: `create_animation_blueprint` itself
+  (real, confirmed), and everything already built at the instance level
+  (`set_animation`, `set_animation_mode`, `play_animation`, etc.). The Enemy
+  AI recipe's `seq_build_anim_state_machine` sequence is **not buildable as
+  designed** — see the correction below.
+- Scratch asset used for this probe (`/Game/MCPTest/ProbeAnimBP`) was deleted
+  after the probe; nothing was left behind in the project.
 
-- Backing API: `unreal.WidgetBlueprintLibrary.create` + the resulting
-  widget's `add_to_viewport()`. PLAN.md flags this "probe first — 0 hits in
-  the stub under that name" — this is a live-probe item before anything
-  else, not a docs-confirmed call yet.
-- Order: `create_widget_blueprint` (confirmed buildable) → resolve the
-  widget class → `WidgetBlueprintLibrary.create(widget_class, owning_player)`
-  → `.add_to_viewport()` on the result. PIE-only: a widget only meaningfully
-  renders during Play, so this tool's useful verification requires a PIE
-  session already running.
-- Verification: read back `is_in_viewport()` if that method exists on the
-  live object (confirm via the step-3 `dir()` sweep); if it doesn't exist,
-  verification has to be "no exception raised and the widget object is
-  non-null," flagged as weaker than the project's usual read-back bar and
-  stated as such in the tool's own docstring, not silently accepted as
-  equivalent.
-- Security tier: `CONSTRUCTIVE`.
-- **Gates:** the entire UI/UMG recipe.
+**Correction this forces on the Enemy AI recipe (SEQUENCE_DESIGNS.md):**
+`seq_build_anim_state_machine` cannot author Idle/Patrol/Chase/Attack/Flee as
+a real AnimBP state machine. The honest substitute, within what's actually
+buildable: drive the same patrol/chase/attack *behavior* at the instance
+level, the same way `bring_character_to_life`/`afflict_with_limp` already do
+— `seq_wire_perception_logic`'s Blueprint graph function (fully buildable,
+unaffected by this finding) sets `CanSeeTarget`/`InAttackRange` booleans, and
+a second graph function swaps which AnimSequence plays via `set_animation`
+(instance-level, already built) when those booleans change state, rather
+than via authored AnimBP transitions. This loses blend-in/out smoothness
+between states (an authored transition can cross-fade; an instance-level
+swap is an instant cut) — stated as the real, honest capability ceiling,
+not glossed over. `seq_wire_attack_combo_graph` in the Weapon recipe has the
+same correction applied: combo steps become a sequenced `set_animation`
+calls gated by Blueprint-graph timing logic, not authored AnimBP states.
 
 ### Phase 1: ship with zero new primitives — these need nothing from Phase 0
 

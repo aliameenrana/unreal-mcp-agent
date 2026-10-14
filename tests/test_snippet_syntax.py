@@ -27,6 +27,7 @@ from unreal_mcp.remote_snippets import (
     guarded,
 )
 from unreal_mcp.tools import (
+    assets,
     blueprint_graph,
     blueprints,
     components,
@@ -92,8 +93,10 @@ def fake_bridge(monkeypatch):
     monkeypatch.setattr(lighting, "get_bridge", lambda: fb)
     monkeypatch.setattr(components, "get_bridge", lambda: fb)
     monkeypatch.setattr(meshes, "get_bridge", lambda: fb)
-    # presets calls the primitives in-process rather than the bridge itself, so
-    # it has no get_bridge of its own to patch.
+    # presets calls most primitives in-process rather than the bridge itself,
+    # so it has no get_bridge of its own to patch -- except
+    # apply_material_variant_set, which calls assets.asset_exists directly.
+    monkeypatch.setattr(assets, "get_bridge", lambda: fb)
     return fb
 
 
@@ -183,10 +186,11 @@ def test_set_dressing_pass_snippet_is_valid(fake_bridge):
 
 
 def test_apply_material_variant_set_snippet_is_valid(monkeypatch, fake_bridge):
-    # This tool creates its instances, so it needs the same dict payload the new
-    # create_material_instance returns.
+    # This tool checks asset_exists() first, then creates instances, so it
+    # needs the same dict payload create_material_instance returns, with
+    # 'exists' set True so the existence check doesn't short-circuit it.
     monkeypatch.setattr(fake_bridge, "result",
-                        {"found": True, "error": None,
+                        {"found": True, "error": None, "exists": True,
                          "instance_path": "/Game/Materials/MI_Red",
                          "parent": "/Game/Materials/M_Base.M_Base"})
     presets.apply_material_variant_set(
@@ -1035,9 +1039,11 @@ def test_apply_material_variant_set_refuses_a_missing_base(fake_bridge):
     Regression: a base path that does not resolve made create_material_instance
     return a null instance_path, which was appended to the results, so the call
     reported {"success": True, "count": 1, "instance_paths": [None]} and created
-    nothing. asset_exists() is stubbed False here, so no bridge call happens.
+    nothing. asset_exists() itself always calls the bridge (there's no local
+    short-circuit), but it reports exists=False here, which is what makes
+    apply_material_variant_set stop before ever creating an instance.
     """
-    fake_bridge.result = {"found": False, "error": None,
+    fake_bridge.result = {"found": True, "error": None,
                           "asset_path": "/Game/MCPTest/ZZNope.ZZNope", "exists": False}
     result = presets.apply_material_variant_set(
         "/Game/MCPTest", "/Game/MCPTest/ZZNope.ZZNope", [{"name": "V1"}]
@@ -1045,7 +1051,6 @@ def test_apply_material_variant_set_refuses_a_missing_base(fake_bridge):
     assert result["success"] is False
     assert "not found" in result["error"]
     assert result["instance_paths"] == []
-    assert fake_bridge.last_expr is None
 
 
 def test_apply_material_variant_set_rejects_an_empty_base(fake_bridge):

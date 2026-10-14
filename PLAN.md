@@ -605,8 +605,8 @@ which closes the open question left in TOOL_BUILDING_GUIDE.md's gotcha 1.
 
 ### Animation
 
-- `create_animation_blueprint` — `AssetToolsHelpers` + `AnimBlueprintFactory`.
-- `add_anim_state` / `add_anim_transition` — `AnimationStateMachineLibrary` (available in recent UE Python API).
+- `create_animation_blueprint` — `AssetToolsHelpers` + `AnimBlueprintFactory`. **Confirmed buildable, live-probed**: works cleanly against `/Engine/EditorMeshes/SkeletalMesh/DefaultSkeletalMesh_Skeleton` with `target_skeleton` set via `set_editor_property`.
+- `add_anim_state` / `add_anim_transition` — **🚫 confirmed not buildable, live-probed against the running 5.8 editor, not a docs guess.** `AnimationStateMachineLibrary` exists but is runtime-only (`get_state`/`set_state`), not a graph editor — this entry's original backing-API guess was wrong. `BlueprintGraphEditor` can reach the AnimBP's `AnimGraph` and, after adding an `AnimGraphNode_StateMachine` via `create_node_from_name("Animation|StateMachines|StateMachine", ...)` (location arg is `Vector2D`, not `IntPoint`), can reach the state machine's own inner graph by the node's title — but that inner graph's node palette has exactly 2 entries (comment, documentation), no state/conduit creation path. `AnimStateNode`/`AnimStateConduitNode`/`AnimStateTransitionNode` exist as classes with no factory method found anywhere. Same confirmed-out-of-scope tier as Niagara graph authoring and Landscape sculpting. Full detail in TOOL_BUILDING_GUIDE.md's Phase 0 section; the honest substitute (instance-level `set_animation` swaps driven by Blueprint-graph decision logic) is in SEQUENCE_DESIGNS.md's Enemy AI recipe.
 - `import_animation_sequence` — `AssetImportTask` with `FbxImportUI` animation settings.
 - `set_skeletal_mesh_physics_asset` — `SkeletalMesh.set_editor_property('physics_asset', ...)`.
 - `retarget_animation` — `AnimationLibrary`/IK Rig Python API (newer engine versions only; confirm availability before committing to this one).

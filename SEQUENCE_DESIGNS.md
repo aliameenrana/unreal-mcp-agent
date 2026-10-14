@@ -34,20 +34,31 @@ limits, current at the time it was written. Both are now outdated:
   `tools/blueprint_graph.py`, backed by `unreal.BlueprintGraphEditor`
   (`list_all_nodes`, `add_call_function_node`, `connect_blueprint_pins`,
   etc.). See PLAN.md's "Blueprint graph editing" section.
-- **AnimBP state machine authoring is planned with real, named API backing**
-  (`create_animation_blueprint`, `add_anim_state`, `add_anim_transition` via
-  `AnimationStateMachineLibrary`) — not yet built, but confirmed buildable,
-  not ruled out the way Niagara graph authoring or Landscape sculpting are.
+- **AnimBP state machine authoring (new states, new transitions) is
+  CONFIRMED NOT BUILDABLE**, live-probed against the running 5.8 editor,
+  not a docs guess. `create_animation_blueprint` itself works
+  (`AnimBlueprintFactory`, confirmed). `AnimationStateMachineLibrary` is a
+  runtime query/control surface only (`get_state`/`set_state`), not a graph
+  editor. `BlueprintGraphEditor` can reach both the AnimBP's root `AnimGraph`
+  and, after adding a `StateMachine` node
+  (`create_node_from_name("Animation|StateMachines|StateMachine", ...)`,
+  location arg is `Vector2D` not `IntPoint`), the state machine's own inner
+  graph by the node's title — but that inner graph's available-node palette
+  has exactly 2 entries (comment, documentation), no state/conduit creation
+  path anywhere. `AnimStateNode`/`AnimStateConduitNode`/
+  `AnimStateTransitionNode` exist as classes with no factory method found.
+  This is now in the same confirmed-out-of-scope tier as Niagara graph
+  authoring and Landscape sculpting, not a probe-pending item. Full probe
+  detail in TOOL_BUILDING_GUIDE.md's Phase 0 section.
 
-This matters because the flagship ask — "enemy that patrols, chases,
-attacks, loses sight" — requires exactly these two capabilities to be
-authored as real engine logic (a real AnimBP state machine, a real Blueprint
-function graph deciding transitions) rather than faked with instance-level
-property pokes. The sequences below assume both are available; AnimBP
-authoring sequences are flagged `NEEDS BUILD FIRST` until `add_anim_state`/
-`add_anim_transition` are actually implemented and live-verified, per this
-project's standing rule that a preset/sequence is only built on top of
-already-verified primitives.
+This changes the flagship ask — "enemy that patrols, chases, attacks, loses
+sight" — in one specific way: the state transitions are real (a Blueprint
+function graph, fully buildable, deciding `CanSeeTarget`/`InAttackRange`),
+but which animation plays per state is driven by instance-level
+`set_animation` swaps (already built, confirmed working) rather than by an
+authored AnimBP transition. The behavior is real; the animation blending
+between states is a cut, not a cross-fade, and that's a stated ceiling, not
+a bug to chase further.
 
 What is still correctly out of scope, unchanged from the prior document:
 
@@ -125,28 +136,45 @@ the character's skeleton, checked before any is wired into the state
 machine — catching a skeleton mismatch here is far cheaper than catching it
 after the AnimBP is built.
 
-### `seq_build_anim_state_machine` — NEEDS BUILD FIRST (`add_anim_state`/`add_anim_transition` not yet implemented)
+### `seq_drive_state_animation_by_instance_swap` — replaces `seq_build_anim_state_machine` (confirmed not buildable)
 
-**Goal:** author a real AnimBP state machine with Idle/Patrol/Chase/Attack/
-Flee states and the transitions between them.
+**Goal:** make Idle/Patrol/Chase/Attack/Flee real, observable behavior
+without authoring an AnimBP state machine, since that authoring path is
+confirmed closed (live-probed, see TOOL_BUILDING_GUIDE.md's Phase 0
+section — not a guess, not pending further research).
 
-1. `create_animation_blueprint(skeleton, name)`.
-2. `add_anim_state` once per state (Idle, Patrol, Chase, Attack, Flee),
-   each with its resolved AnimSequence as the state's output.
-3. `add_anim_transition` for each edge: Idle→Patrol (always, on a short
-   delay), Patrol→Chase (on `CanSeeTarget` becoming true), Chase→Attack (on
-   `InAttackRange` becoming true), Attack→Chase (on attack animation
-   finishing and target still in range), Chase→Patrol (on `CanSeeTarget`
-   false for N seconds — the "lose sight" hysteresis, authored as a
-   transition rule reading a timer variable, not an instant flip).
-4. `get_blueprint_compile_errors` on the resulting AnimBP.
+1. `create_animation_blueprint(skeleton, name)` — still useful as a
+   container even though its state machine won't be hand-authored; skip
+   this step entirely and stay in single-node animation mode if the AnimBP
+   isn't otherwise needed (e.g. no other AnimBP-specific feature depends on
+   it for this character).
+2. In the character's own Blueprint, `seq_wire_perception_logic` (next)
+   authors the real decision logic — the behavior is genuinely state-based,
+   just not expressed as an AnimBP graph.
+3. A second Blueprint function graph, `UpdateAnimationForState`, reads the
+   same `CanSeeTarget`/`InAttackRange` variables and calls `set_animation`
+   (already built, instance-level) with the matching AnimSequence for the
+   current state — Idle when neither is true, Patrol when neither but a
+   patrol timer says to move, Chase when `CanSeeTarget`, Attack when
+   `InAttackRange`.
+4. `get_blueprint_compile_errors` on the character Blueprint (not an AnimBP
+   state machine — there isn't one to compile).
 
-**Verification:** compile with zero errors, state count matches intent (5),
-and each transition's condition variable name matches what
-`seq_wire_perception_logic` (next) will actually set — a naming mismatch
-between the two sequences is the single most likely silent-failure point,
-so the two sequences must agree on variable names from a shared spec, not
-each guess independently.
+**Verification:** compile with zero errors; `get_animation_state` read back
+after a short PIE pass at each of the four test conditions (out of range,
+in chase range, in attack range, occluded) confirms the correct
+AnimSequence is actually assigned at each — this is the one place in this
+whole recipe where a short PIE pass is required, not optional, since an
+instance-level swap's correctness can't be confirmed by a compile check
+alone the way an authored transition graph's wiring can.
+
+**Stated ceiling:** this reproduces patrol/chase/attack/flee as real
+decision-driven behavior, which was the actual ask — it does not reproduce
+smooth animation blending between those states (an authored AnimBP
+transition can cross-fade over time; an instance-level `set_animation` swap
+is an instant cut). If blend smoothness becomes a real requirement later,
+that's a C++ escape-hatch item, not a gap this project's Python surface can
+close.
 
 ### `seq_wire_perception_logic`
 
@@ -287,9 +315,12 @@ not merely present alongside it unwired.
   weapon types; shares the cooldown-gate pattern with the projectile
   variant.
 - **`seq_wire_attack_combo_graph`** (melee-specific) — chains 2-3 attack
-  animations with input-buffered transitions: `add_anim_state` per combo
-  step (NEEDS BUILD FIRST, same dependency as the enemy recipe above),
-  gated on a combo-window boolean set by a Blueprint timer.
+  animations with input-buffered transitions. Same correction as the enemy
+  recipe's state machine: not an authored AnimBP combo state machine
+  (confirmed not buildable), instead a Blueprint function graph that
+  sequences `set_animation` calls (instance-level, built) gated on a
+  combo-window boolean set by a timer node, with each step advancing an
+  int combo-index variable the function reads.
 - **`seq_build_sheathe_drawn_toggle`** — a function graph swapping the
   weapon's attach socket between a sheath socket and a hand socket, driven
   by an `IsDrawn` boolean, reusing `attach_prop_to_socket`'s underlying
@@ -583,11 +614,14 @@ insufficient.
 
 ## Build order recommendation
 
-1. **Unblock the two gating primitives first:** `add_anim_state`/
-   `add_anim_transition` (needed by the enemy recipe and the melee combo
-   sequence) and `add_widget_to_viewport` (needed by the entire UI recipe,
-   currently flagged "probe first, 0 hits in the stub"). Nothing patrol/
-   combat/UI-shaped ships without these.
+1. **Phase 0 resolved.** `add_widget_to_viewport` is built and live-verified
+   (`tools/umg.py`) — the UI recipe is unblocked. `add_anim_state`/
+   `add_anim_transition` are confirmed not buildable (live-probed, not a
+   guess) — the enemy-AI and melee-combo sequences are corrected to drive
+   state-dependent animation via instance-level `set_animation` swaps
+   instead of an authored AnimBP state machine; see each sequence's own
+   entry above for the stated ceiling this implies (instant cuts between
+   states, not cross-fades).
 2. **Ship recipes with zero new primitives needed, today:** Level
    generation's `seq_scatter_set_dressing`/`seq_place_lighting_mood` (reuse
    already-built presets), and any `blueprint_graph.py`-only sequence that
