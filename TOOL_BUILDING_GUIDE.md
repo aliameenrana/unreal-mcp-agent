@@ -216,26 +216,39 @@ falloff is `falloff_distance`. Live-verified by write-then-read.
 `SoundConcurrency` **object**; passing a bool raises a nativization TypeError.
 Pass `None`.
 
-### umg.py — one tool survived contact
+### umg.py — five tools, all live-verified
 
-✅ `create_widget_blueprint`
+✅ `create_widget_blueprint`, `add_widget_to_viewport`,
+`remove_widget_from_viewport`, `set_widget_visibility`, `set_widget_text`
 
-📋 `set_widget_text`, `set_widget_visibility`, `add_widget_to_viewport` -- all
-three built, live-probed, and removed.
+The first attempt at this module worked on the Widget Blueprint's **generated
+class** and every property access failed. That was the wrong target, and the
+correct route is an **instance**:
 
-- A freshly created Widget Blueprint's generated class exposes **no properties
-  at all**. `visibility`, `render_transform` and `color_and_opacity` all raise
-  "Failed to find property", because an empty blueprint has no root widget to
-  own them. The setters cannot succeed against an empty blueprint.
-- Reaching an authored widget tree is a separate problem with no Python route
-  found, so they cannot succeed against a full one either.
-- `unreal` in this build has no `WidgetBlueprintLibrary` attribute at all
-  (absent from the stub too, confirmed by probing), so there is no way to
-  instantiate a widget and add it to a viewport.
+- `unreal.new_object(generated_class, outer)` builds one. Argument order is
+  **`(type, outer)`** — the reverse raises "Cannot nativize 'World' as 'Class'".
+- `UserWidget.add_to_viewport()` exists and is a plain void call.
+- `Widget.set_visibility` / `get_visibility` exist on the **instance**. The
+  class exposes neither: a class holds defaults, visibility is per-instance.
+  This is why every class-based probe returned "Failed to find property".
+- There is no `unreal.WidgetBlueprintLibrary` in this build, and
+  `WidgetLayoutLibrary.add_widget_to_viewport` does not exist either.
+  `WidgetLayoutLibrary` has `remove_all_widgets(world_context_object)` and
+  nothing else for widgets — it needs the world argument, which is easy to miss.
+- `UserWidget.add_to_viewport` exists; **`TextBlock.add_to_viewport` does not.**
+  Only widgets that are `UserWidget`s can go on the viewport, so a standalone
+  `TextBlock` cannot be displayed.
 
-`create_widget_blueprint` is verified: creates the asset, and reports
-`parent_resolved` honestly when a `parent_class` string did not resolve to a
-loaded class.
+`set_widget_visibility` builds a fresh instance per call, so `before` always
+reports the class default (`SELF_HIT_TEST_INVISIBLE`) rather than the previous
+call's value. That is correct, not a bug.
+
+Still impossible, and confirmed by probing rather than assumed: **building a
+widget tree.** `WidgetTree` in 5.8 exposes no methods beyond base `Object` — no
+`root_widget`, no `all_widgets`, no `add_child`, no `construct_widget`. So
+`set_widget_text` does not edit a widget inside a blueprint; it creates a
+standalone `TextBlock` and verifies `get_text()` on it. A designer-authored tree
+must be authored in the designer.
 
 ### landscape.py — foliage only
 

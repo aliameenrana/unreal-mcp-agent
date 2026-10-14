@@ -373,6 +373,10 @@ TOOL_RISK_TIERS: dict[str, RiskTier] = {
     "play_sound_at_location": RiskTier.READ_ONLY,
     "create_sound_attenuation": RiskTier.READ_ONLY,
     "create_widget_blueprint": RiskTier.READ_ONLY,
+    "add_widget_to_viewport": RiskTier.READ_ONLY,
+    "remove_widget_from_viewport": RiskTier.CONSTRUCTIVE,
+    "set_widget_visibility": RiskTier.READ_ONLY,
+    "set_widget_text": RiskTier.READ_ONLY,
     "add_foliage_type": RiskTier.READ_ONLY,
     "paint_foliage_instances": RiskTier.READ_ONLY,
     "execute_python": RiskTier.SYSTEM,  # gated separately via check_python_code, not blocked outright

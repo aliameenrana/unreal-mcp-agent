@@ -264,6 +264,10 @@ for _fn in (
 # UMG
 for _fn in (
     umg.create_widget_blueprint,
+    umg.add_widget_to_viewport,
+    umg.remove_widget_from_viewport,
+    umg.set_widget_visibility,
+    umg.set_widget_text,
 ):
     mcp.add_tool(_wrap(_fn))
 
