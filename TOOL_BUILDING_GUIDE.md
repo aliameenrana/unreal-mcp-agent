@@ -623,21 +623,47 @@ grain in PLAN.md's "MetaHuman" section, deliberately deferred until PIE
 screenshot infrastructure exists (a silently broken character is worse than
 no tool, and only a screenshot catches bad topology/missing rig).
 
-### Control Rig — new domain, no module yet, split to 21 tools in PLAN.md
+### Control Rig — asset creation HANGS THE EDITOR (reproduced twice)
 
-📋 Asset-level (`get_control_rig_controller`, `get_control_rig_hierarchy_controller`,
-`list_available_rig_units`), graph mutation split by node type
-(`add_control_rig_unit_node`, `_variable_node`, `_comment_node`,
-`_branch_node`, `_if_node`, `_array_node`, `_template_node`,
-`_function_reference_node`), linking (`connect_control_rig_pins`,
-`disconnect_control_rig_pin`, `disconnect_all_control_rig_pins`), pin values
-(`set_control_rig_pin_default_value`, `get_control_rig_pin_default_value`,
-`add_control_rig_array_pin`, `remove_control_rig_array_pin`), removal
-(`remove_control_rig_node`, `remove_control_rig_exposed_pin`), and hierarchy
-(`add_control_rig_bone`) — BUILDABLE. Full per-tool spec in PLAN.md's
-"Control Rig" section; see also the dedicated "Control Rig" narrative
-section below for the sourcing and the open signature question on
-`add_unit_node`.
+📋 The read side and graph mutation are real and fully bound. **Creating a
+Control Rig asset is not.** The earlier "BUILDABLE, strong real surface" verdict
+was wrong on the one thing that matters most, and wrong the same way
+`add_possessable` was: the calls exist, they look reasonable, and they wedge the
+game thread.
+
+Reproduced twice on a clean editor, each time in isolation:
+
+    AssetToolsHelpers.get_asset_tools().create_asset(
+        "ZZRig", "/Game/MCPTest", unreal.ControlRigBlueprint,
+        unreal.ControlRigAssetFactory())
+
+Process stays alive at ~32% CPU, Remote Control stops answering (`000`), no
+asset is written, and nothing recovers it. The editor must be killed and
+relaunched.
+
+The first probe bundled four operations into one call and produced an
+unattributable timeout. Isolating them showed
+`ControlRigBlueprintLibrary.get_available_rig_units()` is **fine** — 852 units
+returned, editor still responsive. Only `create_asset` hangs. On any domain with
+a hang history, probe one call per round trip or you will not learn which one
+did it.
+
+Genuinely available, for a Control Rig asset that already exists in a project
+(created by hand in the editor):
+
+- `ControlRigBlueprintLibrary`: `get_hierarchy_controller`, `get_preview_mesh`,
+  `set_preview_mesh`, `get_hierarchy`, `get_available_rig_units`
+- `RigVMBlueprintLibrary.get_controller(blueprint)` -> `RigVMController`, which
+  carries a large documented surface: `get_top_level_graph`, `get_nodes`,
+  `add_variable_node`, `add_unit_node`, `add_unit_node_from_struct_path`,
+  `add_template_node`, `add_if_node`, `add_function_reference_node`,
+  `add_comment_node`, `add_link`, `remove_node`, `set_node_position`,
+  `set_node_color`, `set_comment_text`, `break_link`, `export_node_to_text`
+- `RigHierarchyController` for element selection and parenting
+
+So the graph tools are buildable and worth building **the moment this project
+has a Control Rig asset to point them at**. Until then none can be
+live-verified, and an unverified tool does not ship.
 
 ### Automation Tests — new domain, no module yet
 
