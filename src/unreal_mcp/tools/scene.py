@@ -304,8 +304,9 @@ def get_mesh_material_slot(actor_name: str, element_index: int = 0) -> dict:
             f"'slot': {int(element_index)!r}, "
             f"'instance': m.get_name() if m else None, "
             f"'is_dynamic': isinstance(m, {UNREAL}.MaterialInstanceDynamic), "
-            f"'parent': m.get_editor_property('parent').get_path_name() "
-            f"if m and m.get_editor_property('parent') else None}})("
+            f"'parent': (m.get_editor_property('parent').get_path_name() "
+            f"if isinstance(m, {UNREAL}.MaterialInstanceConstant) else None), "
+            f"'is_instance': isinstance(m, {UNREAL}.MaterialInstanceConstant)}})("
             f"c.get_material({int(element_index)!r})))"
             f"({actor_component(actor_expr, 'StaticMeshComponent')}))({actor_expr})",
         )

@@ -623,6 +623,44 @@ grain in PLAN.md's "MetaHuman" section, deliberately deferred until PIE
 screenshot infrastructure exists (a silently broken character is worse than
 no tool, and only a screenshot catches bad topology/missing rig).
 
+### Verification sweep: what the read-only surface actually does
+
+A pass that called every READ_ONLY registered tool against the live editor with
+a representative argument, to convert "built" into "confirmed". Most tools were
+already fine; the sweep found one real defect and documented the rest.
+
+**Defect found and fixed.** `get_mesh_material_slot` read
+`m.get_editor_property('parent')` unconditionally, so it threw
+"'Material' object has no attribute 'parent'" on any slot holding a base
+Material rather than a MaterialInstanceConstant -- which is the common case for
+a level's static-mesh actors. It now guards on
+`isinstance(m, MaterialInstanceConstant)` and reports `is_instance` so the
+caller can tell a base material from an instance with a parent.
+
+Verified in this sweep, all against real assets: `get_blueprint_info`,
+`list_blueprint_graphs`, `list_blueprint_functions`, `list_blueprint_events`,
+`list_blueprint_variables`, `list_blueprint_event_dispatchers`,
+`verify_replication_setup`, `get_mesh_bounds`, `get_mesh_collision_info`,
+`get_texture_info`, `get_property`, `get_mesh_material_slot`.
+
+Still unverified, each for a stated reason:
+
+- `get_skeletal_mesh_sockets`, `get_animation_state` -- correctly reject
+  non-SkeletalMesh input; need a SkeletalMesh asset this project does not have.
+- `create_data_table` and the three readers that need an existing table --
+  `row_struct_class` must be a `ScriptStruct`, and **only two ScriptStruct
+  subclasses exist in this build's Python API**, neither usable as a table row.
+  The tool reports "not a ScriptStruct" correctly; it just cannot be confirmed
+  end to end.
+- `capture_viewport_screenshot` -- queues the task, never writes a file here.
+
+A caution about this class of sweep: a first run reported eleven Blueprint and
+mesh tools as failures that were actually the sweep's fault, having passed a
+material where a Blueprint or a StaticMesh was required. The tools rejected the
+wrong type correctly. Re-running with real fixtures for each asset class turned
+every one of those green, so a sweep's "FAIL" is evidence about the argument
+supplied, not automatically about the tool.
+
 ### Three more built; three more built-then-removed
 
 ✅ `get_level_info`, `get_child_instances`, `import_asset`
